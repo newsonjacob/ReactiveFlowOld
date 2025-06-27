@@ -17,7 +17,8 @@ from uav.perception import OpticalFlowTracker
 from uav.utils import FLOW_STD_MAX
 
 # Default path to the Unreal Engine simulator used during development
-DEFAULT_UE4_PATH = r"C:\Users\newso\Documents\AirSimExperiments\BlocksBuild\WindowsNoEditor\Blocks\Binaries\Win64\Blocks.exe"
+DEFAULT_UE4_PATH = r"H:\Documents\AirSim\Packaged\BlocksBuild\WindowsNoEditor\Blocks\Binaries\Win64\Blocks.exe"
+SETTINGS_PATH = r"C:\Users\Jacob\Documents\AirSim\settings.json"
 
 # Allow overriding the path via environment variable
 ENV_UE4_PATH = os.environ.get("UE4_PATH")
@@ -134,9 +135,16 @@ def main():
     start_gui(param_refs)
 
     # === LAUNCH UE4 SIMULATION ===
-    ue4_exe = args.ue4_path
+    ue4_exe = args.ue4_path if args.ue4_path else DEFAULT_UE4_PATH
+    sim_process = None
     try:
-        sim_process = subprocess.Popen([ue4_exe, "-windowed", "-ResX=1280", "-ResY=720"])
+        sim_process = subprocess.Popen([
+        DEFAULT_UE4_PATH,
+        "-windowed",
+        "-ResX=1280",
+        "-ResY=720",
+        f"-settings={SETTINGS_PATH}"
+        ])
         print("Launching Unreal Engine simulation...")
         time.sleep(5)
     except Exception as e:
