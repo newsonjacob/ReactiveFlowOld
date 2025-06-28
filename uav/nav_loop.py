@@ -198,6 +198,292 @@ def write_video_frame(queue, frame):
     except Exception:
         pass
 
+
+def process_perception_data(
+    client,
+    args,
+    data,
+    frame_count,
+    frame_queue,
+    flow_history,
+    navigator,
+    param_refs,
+    time_now,
+    max_flow_mag,
+):
+    """Process perception output and update histories."""
+    (
+        vis_img,
+        good_old,
+        flow_vectors,
+        flow_std,
+        simgetimage_s,
+        decode_s,
+        processing_s,
+    ) = data
+
+    gray = cv2.cvtColor(vis_img, cv2.COLOR_BGR2GRAY)
+
+    if frame_count == 1 and len(good_old) == 0:
+        frame_queue.put(vis_img)
+        return None
+
+    if args.manual_nudge and frame_count == 5:
+        logger.info("Manual nudge forward for test")
+        client.moveByVelocityAsync(2, 0, 0, 2)
+
+    magnitudes = np.linalg.norm(flow_vectors, axis=1)
+    num_clamped = np.sum(magnitudes > max_flow_mag)
+    if num_clamped > 0:
+        logger.warning("Clamped %d large flow magnitudes to %s", num_clamped, max_flow_mag)
+    magnitudes = np.clip(magnitudes, 0, max_flow_mag)
+
+    good_old = good_old.reshape(-1, 2)
+    (
+        left_mag,
+        center_mag,
+        right_mag,
+        probe_mag,
+        probe_count,
+        left_count,
+        center_count,
+        right_count,
+    ) = compute_region_stats(magnitudes, good_old, gray.shape[1])
+
+    flow_history.update(left_mag, center_mag, right_mag)
+    smooth_L, smooth_C, smooth_R = flow_history.average()
+    param_refs['L'][0] = smooth_L
+    param_refs['C'][0] = smooth_C
+    param_refs['R'][0] = smooth_R
+
+    if navigator.just_resumed and time_now < navigator.resume_grace_end_time:
+        cv2.putText(vis_img, "GRACE", (1100, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 3)
+
+    in_grace = navigator.just_resumed and time_now < navigator.resume_grace_end_time
+
+    return (
+        vis_img,
+        good_old,
+        flow_vectors,
+        flow_std,
+        simgetimage_s,
+        decode_s,
+        processing_s,
+        smooth_L,
+        smooth_C,
+        smooth_R,
+        probe_mag,
+        probe_count,
+        left_count,
+        center_count,
+        right_count,
+        in_grace,
+    )
+
+
+def apply_navigation_decision(
+    client,
+    navigator,
+    flow_history,
+    good_old,
+    flow_vectors,
+    flow_std,
+    smooth_L,
+    smooth_C,
+    smooth_R,
+    probe_mag,
+    probe_count,
+    left_count,
+    center_count,
+    right_count,
+    frame_queue,
+    vis_img,
+    time_now,
+    frame_count,
+    prev_state,
+    state_history,
+    pos_history,
+    param_refs,
+):
+    """Wrapper around :func:`navigation_step`."""
+    return navigation_step(
+        client,
+        navigator,
+        flow_history,
+        good_old,
+        flow_vectors,
+        flow_std,
+        smooth_L,
+        smooth_C,
+        smooth_R,
+        probe_mag,
+        probe_count,
+        left_count,
+        center_count,
+        right_count,
+        frame_queue,
+        vis_img,
+        time_now,
+        frame_count,
+        prev_state,
+        state_history,
+        pos_history,
+        param_refs,
+    )
+
+
+def write_frame_output(
+    client,
+    vis_img,
+    frame_queue,
+    loop_start,
+    frame_duration,
+    fps_list,
+    start_time,
+    smooth_L,
+    smooth_C,
+    smooth_R,
+    left_count,
+    center_count,
+    right_count,
+    good_old,
+    flow_vectors,
+    in_grace,
+    frame_count,
+    time_now,
+    param_refs,
+    log_file,
+    log_buffer,
+    state_str,
+    obstacle_detected,
+    side_safe,
+    brake_thres,
+    dodge_thres,
+    probe_req,
+    simgetimage_s,
+    decode_s,
+    processing_s,
+    flow_std,
+):
+    """Write video frame, overlay and log data."""
+    write_video_frame(frame_queue, vis_img)
+
+    elapsed = time.time() - loop_start
+    if elapsed < frame_duration:
+        time.sleep(frame_duration - elapsed)
+    loop_elapsed = time.time() - loop_start
+    actual_fps = 1 / max(loop_elapsed, 1e-6)
+    loop_start = time.time()
+
+    fps_list.append(actual_fps)
+
+    pos, yaw, speed = get_drone_state(client)
+    collision = client.simGetCollisionInfo()
+    collided = int(getattr(collision, "has_collided", False))
+    vis_img = draw_overlay(
+        vis_img,
+        frame_count,
+        speed,
+        param_refs['state'][0],
+        time_now - start_time,
+        smooth_L,
+        smooth_C,
+        smooth_R,
+        left_count,
+        center_count,
+        right_count,
+        good_old,
+        flow_vectors,
+        in_grace=in_grace,
+    )
+
+    log_line = format_log_line(
+        frame_count,
+        time_now,
+        good_old,
+        smooth_L,
+        smooth_C,
+        smooth_R,
+        flow_std,
+        pos,
+        yaw,
+        speed,
+        state_str,
+        collided,
+        obstacle_detected,
+        side_safe,
+        brake_thres,
+        dodge_thres,
+        probe_req,
+        actual_fps,
+        simgetimage_s,
+        decode_s,
+        processing_s,
+        loop_elapsed,
+    )
+    log_frame_data(log_file, log_buffer, log_line)
+
+    logger.debug("Actual FPS: %.2f", actual_fps)
+    logger.debug("Features detected: %d", len(good_old))
+
+    return loop_start
+
+
+def handle_reset(client, ctx, frame_count):
+    """Reset simulation and restart logging/video."""
+    param_refs = ctx['param_refs']
+    flow_history = ctx['flow_history']
+    navigator = ctx['navigator']
+    frame_queue = ctx['frame_queue']
+    video_thread = ctx['video_thread']
+    out = ctx['out']
+    log_file = ctx['log_file']
+    log_buffer = ctx['log_buffer']
+    fourcc = ctx['fourcc']
+
+    logger.info("Resetting simulation...")
+    try:
+        client.landAsync().join()
+        client.reset()
+        client.enableApiControl(True)
+        client.armDisarm(True)
+        client.takeoffAsync().join()
+        client.moveToPositionAsync(0, 0, -2, 2).join()
+    except Exception as e:
+        logger.error("Reset error: %s", e)
+
+    ctx['flow_history'] = FlowHistory()
+    ctx['navigator'] = Navigator(client)
+    frame_count = 0
+    param_refs['reset_flag'][0] = False
+
+    if log_buffer:
+        log_file.writelines(log_buffer)
+        log_buffer.clear()
+    log_file.close()
+    ctx['timestamp'] = datetime.now().strftime('%Y%m%d_%H%M%S')
+    timestamp = ctx['timestamp']
+    log_file = open(f"flow_logs/full_log_{timestamp}.csv", 'w')
+    ctx['log_file'] = log_file
+    log_file.write(
+        "frame,time,features,flow_left,flow_center,flow_right,"
+        "flow_std,pos_x,pos_y,pos_z,yaw,speed,state,collided,obstacle,side_safe,"
+        "brake_thres,dodge_thres,probe_req,fps,simgetimage_s,decode_s,processing_s,loop_s\n"
+    )
+    retain_recent_logs("flow_logs")
+
+    frame_queue.put(None)
+    video_thread.join()
+    out.release()
+    out = cv2.VideoWriter(
+        config.VIDEO_OUTPUT, fourcc, config.VIDEO_FPS, config.VIDEO_SIZE
+    )
+    ctx['out'] = out
+    video_thread = start_video_writer_thread(frame_queue, out, ctx['exit_flag'])
+    ctx['video_thread'] = video_thread
+
+    return frame_count
+
 def setup_environment(args, client):
     """Initialize the navigation environment and return a context dict."""
     MAX_SIM_DURATION = config.MAX_SIM_DURATION
@@ -403,15 +689,7 @@ def navigation_loop(args, client, ctx):
                     logger.info("Startup grace period complete — beginning full nav logic")
 
             try:
-                (
-                    vis_img,
-                    good_old,
-                    flow_vectors,
-                    flow_std,
-                    simgetimage_s,
-                    decode_s,
-                    processing_s,
-                ) = perception_queue.get(timeout=1.0)
+                data = perception_queue.get(timeout=1.0)
             except Exception:
                 continue
 
@@ -429,55 +707,48 @@ def navigation_loop(args, client, ctx):
                 logger.info("Goal reached — landing.")
                 break
 
-            try:
-                (
-                    vis_img,
-                    good_old,
-                    flow_vectors,
-                    flow_std,
-                    simgetimage_s,
-                    decode_s,
-                    processing_s,
-                ) = perception_queue.get(timeout=1.0)
-            except Exception:
+            processed = process_perception_data(
+                client,
+                args,
+                data,
+                frame_count,
+                frame_queue,
+                flow_history,
+                navigator,
+                param_refs,
+                time_now,
+                MAX_FLOW_MAG,
+            )
+            if processed is None:
                 continue
-
-            gray = cv2.cvtColor(vis_img, cv2.COLOR_BGR2GRAY)
-
-            if frame_count == 1 and len(good_old) == 0:
-                frame_queue.put(vis_img)
-                continue
-
-            if args.manual_nudge and frame_count == 5:
-                logger.info("Manual nudge forward for test")
-                client.moveByVelocityAsync(2, 0, 0, 2)
-
-            magnitudes = np.linalg.norm(flow_vectors, axis=1)
-            num_clamped = np.sum(magnitudes > MAX_FLOW_MAG)
-            if num_clamped > 0:
-                logger.warning("Clamped %d large flow magnitudes to %s", num_clamped, MAX_FLOW_MAG)
-            magnitudes = np.clip(magnitudes, 0, MAX_FLOW_MAG)
-
-            good_old = good_old.reshape(-1, 2)
 
             (
-                left_mag, center_mag, right_mag,
-                probe_mag, probe_count,
-                left_count, center_count, right_count
-            ) = compute_region_stats(magnitudes, good_old, gray.shape[1])
+                vis_img,
+                good_old,
+                flow_vectors,
+                flow_std,
+                simgetimage_s,
+                decode_s,
+                processing_s,
+                smooth_L,
+                smooth_C,
+                smooth_R,
+                probe_mag,
+                probe_count,
+                left_count,
+                center_count,
+                right_count,
+                in_grace,
+            ) = processed
 
-            flow_history.update(left_mag, center_mag, right_mag)
-            smooth_L, smooth_C, smooth_R = flow_history.average()
-            param_refs['L'][0] = smooth_L
-            param_refs['C'][0] = smooth_C
-            param_refs['R'][0] = smooth_R
-
-            if navigator.just_resumed and time_now < navigator.resume_grace_end_time:
-                cv2.putText(vis_img, "GRACE", (1100, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 3)
-
-            in_grace = navigator.just_resumed and time_now < navigator.resume_grace_end_time
-
-            state_str, obstacle_detected, side_safe, brake_thres, dodge_thres, probe_req = navigation_step(
+            (
+                state_str,
+                obstacle_detected,
+                side_safe,
+                brake_thres,
+                dodge_thres,
+                probe_req,
+            ) = apply_navigation_decision(
                 client,
                 navigator,
                 flow_history,
@@ -503,86 +774,47 @@ def navigation_loop(args, client, ctx):
             )
 
             if param_refs['reset_flag'][0]:
-                logger.info("Resetting simulation...")
-                try:
-                    client.landAsync().join()
-                    client.reset()
-                    client.enableApiControl(True)
-                    client.armDisarm(True)
-                    client.takeoffAsync().join()
-                    client.moveToPositionAsync(0, 0, -2, 2).join()
-                except Exception as e:
-                    logger.error("Reset error: %s", e)
-
-                flow_history = FlowHistory()
-                navigator = Navigator(client)
-                frame_count = 0
-                param_refs['reset_flag'][0] = False
-
-                if log_buffer:
-                    log_file.writelines(log_buffer)
-                    log_buffer.clear()
-                log_file.close()
-                ctx['timestamp'] = datetime.now().strftime('%Y%m%d_%H%M%S')
-                timestamp = ctx['timestamp']
-                log_file = open(f"flow_logs/full_log_{timestamp}.csv", 'w')
-                ctx['log_file'] = log_file
-                log_file.write(
-                    "frame,time,features,flow_left,flow_center,flow_right,"
-                    "flow_std,pos_x,pos_y,pos_z,yaw,speed,state,collided,obstacle,side_safe,"
-                    "brake_thres,dodge_thres,probe_req,fps,simgetimage_s,decode_s,processing_s,loop_s\n"
-                )
-                retain_recent_logs("flow_logs")
-
-                frame_queue.put(None)
-                video_thread.join()
-                out.release()
-                out = cv2.VideoWriter(
-                    config.VIDEO_OUTPUT, fourcc, config.VIDEO_FPS, config.VIDEO_SIZE
-                )
-                ctx['out'] = out
-                video_thread = Thread(target=video_worker, daemon=True)
-                video_thread.start()
-                ctx['video_thread'] = video_thread
+                frame_count = handle_reset(client, ctx, frame_count)
+                flow_history = ctx['flow_history']
+                navigator = ctx['navigator']
+                log_file = ctx['log_file']
+                video_thread = ctx['video_thread']
+                out = ctx['out']
                 continue
 
-            write_video_frame(frame_queue, vis_img)
-
-            elapsed = time.time() - loop_start
-            if elapsed < frame_duration:
-                time.sleep(frame_duration - elapsed)
-            loop_elapsed = time.time() - loop_start
-            actual_fps = 1 / max(loop_elapsed, 1e-6)
-            loop_start = time.time()
-
-            fps_list.append(actual_fps)
-
-            pos, yaw, speed = get_drone_state(client)
-            collision = client.simGetCollisionInfo()
-            collided = int(getattr(collision, "has_collided", False))
-            vis_img = draw_overlay(
+            loop_start = write_frame_output(
+                client,
                 vis_img,
-                frame_count,
-                speed,
-                param_refs['state'][0],
-                time_now - start_time,
-                smooth_L, smooth_C, smooth_R,
-                left_count, center_count, right_count,
+                frame_queue,
+                loop_start,
+                frame_duration,
+                fps_list,
+                start_time,
+                smooth_L,
+                smooth_C,
+                smooth_R,
+                left_count,
+                center_count,
+                right_count,
                 good_old,
                 flow_vectors,
-                in_grace=in_grace
+                in_grace,
+                frame_count,
+                time_now,
+                param_refs,
+                log_file,
+                log_buffer,
+                state_str,
+                obstacle_detected,
+                side_safe,
+                brake_thres,
+                dodge_thres,
+                probe_req,
+                simgetimage_s,
+                decode_s,
+                processing_s,
+                flow_std,
             )
-
-            log_line = format_log_line(
-                frame_count, time_now, good_old, smooth_L, smooth_C, smooth_R, flow_std,
-                pos, yaw, speed, state_str, collided, obstacle_detected, side_safe,
-                brake_thres, dodge_thres, probe_req, actual_fps,
-                simgetimage_s, decode_s, processing_s, loop_elapsed
-            )
-            log_frame_data(log_file, log_buffer, log_line)
-
-            logger.debug("Actual FPS: %.2f", actual_fps)
-            logger.debug("Features detected: %d", len(good_old))
 
     except KeyboardInterrupt:
         logger.info("Interrupted.")
