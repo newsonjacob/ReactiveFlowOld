@@ -12,6 +12,10 @@ def test_helper_functions_exist(monkeypatch):
         'setup_environment',
         'start_perception_thread',
         'navigation_loop',
+        'process_perception_data',
+        'apply_navigation_decision',
+        'write_frame_output',
+        'handle_reset',
         'cleanup',
     ):
         assert hasattr(nl, name)
