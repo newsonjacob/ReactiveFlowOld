@@ -86,6 +86,10 @@ This repository contains the implementation of a reactive obstacle avoidance sys
    ```bash
    python main.py --settings-path C:\path\to\settings.json --ue4-path C:\path\to\Blocks.exe
    ```
+   To load a different configuration file:
+   ```bash
+   python main.py --config custom.ini
+   ```
 
 ---
 

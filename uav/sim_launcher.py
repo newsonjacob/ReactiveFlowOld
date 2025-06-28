@@ -2,10 +2,11 @@ import subprocess
 import time
 import logging
 from configparser import ConfigParser
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-def launch_sim(args, settings_path, config: ConfigParser | None = None):
+def launch_sim(args, settings_path, config: Optional[ConfigParser] = None):
     map_launch_args = {
         "reactive": "/Game/Maps/Map_Reactive",
         "deliberative": "/Game/Maps/Map_Deliberative",
