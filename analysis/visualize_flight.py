@@ -1,10 +1,13 @@
 import argparse
 import json
+import logging
 
 import pandas as pd
 import plotly.graph_objects as go
 from scipy.spatial.transform import Rotation as R
 import numpy as np  # exposed for tests  # noqa: F401
+
+logger = logging.getLogger(__name__)
 
 
 def load_telemetry(log_path):
@@ -217,30 +220,30 @@ def main():
     try:
         telemetry, *_ = load_telemetry(args.log)
     except Exception as e:
-        print(f"Error loading telemetry: {e}")
+        logger.error("Error loading telemetry: %s", e)
         return
 
     try:
         obstacles = load_obstacles(args.obstacles)
     except Exception as e:
-        print(f"Error loading obstacles: {e}")
+        logger.error("Error loading obstacles: %s", e)
         return
 
     try:
         marker = find_alignment_marker(obstacles)
     except Exception as e:
-        print(f"Error finding alignment marker: {e}")
+        logger.error("Error finding alignment marker: %s", e)
         return
 
     if len(telemetry) == 0:
-        print("No telemetry data available")
+        logger.warning("No telemetry data available")
         return
 
     offset = compute_offset(telemetry[0], marker, scale=args.scale)
 
     fig = build_plot(telemetry, obstacles, offset, scale=args.scale)
     fig.write_html(args.output)
-    print(f"✅ Visualization saved to {args.output}")
+    logger.info("\u2705 Visualization saved to %s", args.output)
 
 
 if __name__ == '__main__':

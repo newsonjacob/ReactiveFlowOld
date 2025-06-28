@@ -6,6 +6,7 @@ from __future__ import annotations
 import glob
 import os
 import subprocess
+import logging
 from typing import List, Tuple
 
 # Use absolute import so the script works when executed directly
@@ -20,6 +21,8 @@ if __package__ is None:
 
 from analysis.summarize_runs import summarize_log
 from analysis.utils import retain_recent_views
+
+logger = logging.getLogger(__name__)
 
 
 def ensure_visualization(log_path: str, html_path: str) -> None:
@@ -44,7 +47,7 @@ def main() -> None:
     pattern = os.path.join("flow_logs", "full_log_*.csv")
     logs = sorted(glob.glob(pattern))
     if not logs:
-        print(f"No log files found matching {pattern}")
+        logger.warning("No log files found matching %s", pattern)
         return
 
     results: List[Tuple[str, int, int, float]] = []
@@ -54,7 +57,7 @@ def main() -> None:
             frames, collisions, distance = summarize_log(path)
             results.append((path, frames, collisions, distance))
         except Exception as exc:
-            print(f"Error processing {path}: {exc}")
+            logger.error("Error processing %s: %s", path, exc)
             continue
 
         timestamp = os.path.basename(path)[len("full_log_"):-len(".csv")]
@@ -71,7 +74,7 @@ def main() -> None:
     report_path = os.path.join("analysis", "summary_report.txt")
     with open(report_path, "w") as fh:
         fh.write("\n".join(report_lines))
-    print(f"Summary written to {report_path}")
+    logger.info("Summary written to %s", report_path)
 
 
 if __name__ == "__main__":

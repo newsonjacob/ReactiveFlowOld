@@ -3,11 +3,14 @@
 import math
 import os
 import fnmatch
+import logging
 import cv2
 import numpy as np
 import airsim
 from analysis.utils import retain_recent_files
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 # Maximum acceptable standard deviation of optical flow magnitudes. When the
 # measured value exceeds this threshold the flow is considered unreliable.
@@ -35,7 +38,7 @@ def get_drone_state(client):
     try:
         state = client.getMultirotorState()
     except Exception as e:
-        print(f"State fetch error: {e}")
+        logger.warning("State fetch error: %s", e)
         return airsim.Vector3r(0, 0, 0), 0.0, 0.0
     pos = state.kinematics_estimated.position
     ori = state.kinematics_estimated.orientation
@@ -68,18 +71,18 @@ def retain_recent_logs(log_dir: str, keep: int = 5) -> None:
             if fnmatch.fnmatch(f, "full_log_*.csv")
         ]
     except FileNotFoundError:
-        print(f"⚠️ Log directory '{log_dir}' not found.")
+        logger.warning("\u26A0\uFE0F Log directory '%s' not found.", log_dir)
         return
 
     files.sort(key=_timestamp_from_name, reverse=True)
-    print(f"🧹 Found {len(files)} logs, keeping {keep} most recent.")
+    logger.info("\U0001F9F9 Found %d logs, keeping %d most recent.", len(files), keep)
 
     for old_file in files[keep:]:
         try:
-            print(f"🗑️ Deleting old log: {old_file}")
+            logger.info("\U0001F5D1\uFE0F Deleting old log: %s", old_file)
             os.remove(old_file)
         except OSError as e:
-            print(f"⚠️ Could not delete {old_file}: {e}")
+            logger.warning("\u26A0\uFE0F Could not delete %s: %s", old_file, e)
 
 def should_flat_wall_dodge(
     center_mag: float,

@@ -12,10 +12,13 @@ from __future__ import annotations
 import argparse
 import glob
 import os
+import logging
 from typing import Tuple
 
 import numpy as np
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 
 def summarize_log(path: str) -> Tuple[int, int, float]:
@@ -59,19 +62,22 @@ def main() -> None:
     pattern = os.path.join(args.log_dir, "full_log_*.csv")
     files = sorted(glob.glob(pattern))
     if not files:
-        print(f"No log files found matching {pattern}")
+        logger.warning("No log files found matching %s", pattern)
         return
 
     for path in files:
         try:
             frames, collisions, distance = summarize_log(path)
             name = os.path.basename(path)
-            print(
-                f"{name}: frames={frames}, collisions={collisions}, "
-                f"distance={distance:.2f}"
+            logger.info(
+                "%s: frames=%d, collisions=%d, distance=%.2f",
+                name,
+                frames,
+                collisions,
+                distance,
             )
         except Exception as exc:
-            print(f"Error processing {path}: {exc}")
+            logger.error("Error processing %s: %s", path, exc)
 
 
 if __name__ == "__main__":

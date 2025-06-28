@@ -87,6 +87,7 @@ This repository contains the implementation of a reactive obstacle avoidance sys
 
 - Flight logs are stored in `flow_logs/` as `.csv`
 - 3D trajectory plots are saved in `analysis/` as interactive `.html` files
+- Runtime messages are emitted via the standard `logging` module
 
 ---
 

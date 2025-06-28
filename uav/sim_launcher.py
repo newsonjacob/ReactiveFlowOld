@@ -1,5 +1,8 @@
 import subprocess
 import time
+import logging
+
+logger = logging.getLogger(__name__)
 
 def launch_sim(args, settings_path):
     map_launch_args = {
@@ -26,7 +29,7 @@ def launch_sim(args, settings_path):
         map_path
     ]
 
-    print(f"🚀 Launching UE4 map '{args.map}'...")
+    logger.info("\U0001F680 Launching UE4 map '%s'...", args.map)
     sim_process = subprocess.Popen(sim_cmd)
     time.sleep(5)  # Give UE4 time to boot up
     return sim_process

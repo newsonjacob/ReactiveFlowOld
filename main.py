@@ -7,6 +7,7 @@ from uav.nav_loop import (
     cleanup,
 )
 import airsim
+import logging
 from uav.utils import FLOW_STD_MAX as UTIL_FLOW_STD_MAX
 
 FLOW_STD_MAX = UTIL_FLOW_STD_MAX
@@ -15,6 +16,7 @@ SETTINGS_PATH = r"C:\Users\Jacob\Documents\AirSim\settings.json"
 
 
 def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     args = parse_args()
     sim_process = launch_sim(args, SETTINGS_PATH)
 
