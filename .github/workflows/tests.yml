@@ -16,7 +16,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip setuptools wheel
-          pip install numpy msgpack-rpc-python
+          pip install numpy msgpack-rpc-python pytest
           pip install --no-build-isolation airsim
           pip install -r requirements.txt
           pip install -e .
