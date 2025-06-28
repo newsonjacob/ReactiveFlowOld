@@ -1,4 +1,5 @@
 # Reactive Optical Flow UAV Navigation
+[![CI](https://github.com/newsonjacob/ReactiveOptical_Flow/actions/workflows/tests.yml/badge.svg)](https://github.com/newsonjacob/ReactiveOptical_Flow/actions/workflows/tests.yml)
 
 This repository contains the implementation of a reactive obstacle avoidance system for a simulated UAV using optical flow. The UAV operates in a GPS-denied environment simulated via AirSim and Unreal Engine 4.
 
@@ -14,6 +15,12 @@ This repository contains the implementation of a reactive obstacle avoidance sys
 - Works with auto-launched AirSim simulation
 
 ---
+
+## Installation
+
+```bash
+pip install -e .
+```
 
 ## 🚁 How It Works
 
@@ -35,6 +42,7 @@ This repository contains the implementation of a reactive obstacle avoidance sys
 2. Install required Python packages:
    ```bash
    pip install -r requirements.txt
+   pip install -e .
    ```
 
 3. Place a valid AirSim `settings.json` at:
