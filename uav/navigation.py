@@ -13,7 +13,8 @@ class Navigator:
         self.dodging = False
         self.settling = False
         self.last_movement_time = time.time()
-        self.grace_period_end_time = 0
+        self.grace_used = False  # add in __init__
+        self.grace_period_end_time: float = 0.0
         self.settle_end_time = 0
         self.just_resumed = False
         self.resume_grace_end_time = 0
@@ -35,33 +36,35 @@ class Navigator:
         self.braked = True
         return "brake"
 
-    def dodge(self, smooth_L, smooth_C, smooth_R, duration: float = 2.0):
+    def dodge(self, smooth_L, smooth_C, smooth_R, duration: float = 2.0, direction: str = None):
         print(
             f"🔍 Dodge Decision — L: {smooth_L:.1f}, "
             f"C: {smooth_C:.1f}, R: {smooth_R:.1f}"
         )
 
-        left_safe = smooth_L < 0.8 * smooth_C
-        right_safe = smooth_R < 0.8 * smooth_C
+        # Allow external override of dodge direction (used in hybrid scoring)
+        if direction is None:
+            left_safe = smooth_L < 0.8 * smooth_C
+            right_safe = smooth_R < 0.8 * smooth_C
 
-        if left_safe and not right_safe:
-            direction = "left"
-        elif right_safe and not left_safe:
-            direction = "right"
-        elif left_safe and right_safe:
-            direction = "left" if smooth_L <= smooth_R else "right"
-            print(f"⚠️ Both sides okay — picking {direction}")
+            if left_safe and not right_safe:
+                direction = "left"
+            elif right_safe and not left_safe:
+                direction = "right"
+            elif left_safe and right_safe:
+                direction = "left" if smooth_L <= smooth_R else "right"
+                print(f"⚠️ Both sides okay — picking {direction}")
+            else:
+                direction = "left" if smooth_L <= smooth_R else "right"
+                print(f"⚠️ No safe sides — forcing {direction}")
         else:
-            direction = "left" if smooth_L <= smooth_R else "right"
-            print(f"⚠️ No safe sides — forcing {direction}")
+            print(f"📣 Dodge direction forced by caller: {direction}")
 
         lateral = 1.0 if direction == "right" else -1.0
         strength = 0.5 if max(smooth_L, smooth_R) > 100 else 1.0
-        # Reduce forward motion during the dodge to prioritize lateral movement
-        # Prevent forward motion during the dodge
         forward_speed = 0.0
 
-        # Fully stop before moving laterally
+        # Stop before dodging
         self.brake()
 
         print(
@@ -93,7 +96,7 @@ class Navigator:
         self.just_resumed = True
         self.resume_grace_end_time = time.time() + 0.75  # 0.75 second grace
         self.last_movement_time = time.time()
-        return "resume"
+        return "resume_forward"
 
     def blind_forward(self):
         """Move forward when no features are detected."""
@@ -120,14 +123,21 @@ class Navigator:
         """Reissue the forward command to reinforce motion."""
         print("🔁 Reinforcing forward motion")
         self.client.moveByVelocityAsync(
-            2,
-            0,
-            0,
+            2, 0, 0,
             duration=3,
             drivetrain=airsim.DrivetrainType.ForwardOnly,
             yaw_mode=airsim.YawMode(False, 0),
         )
+        self.braked = False
+        self.dodging = False
         self.last_movement_time = time.time()
+
+        if not self.grace_used:
+            self.just_resumed = True
+            self.resume_grace_end_time = time.time() + 1.0
+            self.grace_used = True
+            print("🕒 Grace period started (first movement only)")
+
         return "resume_reinforce"
 
     def timeout_recover(self):

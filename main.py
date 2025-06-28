@@ -11,10 +11,14 @@ import argparse
 from queue import Queue
 from threading import Thread
 from multiprocessing import Process, Queue as MPQueue
-
+from uav.scoring import get_weighted_scores, compute_region_stats
+from uav.overlay import draw_overlay
 from uav.perception import OpticalFlowTracker
-
+from uav.state_checks import in_grace_period, format_log_line
+from uav.logging_utils import format_log_entry
+from uav.video_utils import start_video_writer_thread
 from uav.utils import FLOW_STD_MAX
+from uav.navigation_rules import compute_thresholds
 
 # Default path to the Unreal Engine simulator used during development
 DEFAULT_UE4_PATH = r"H:\Documents\AirSim\Packaged\BlocksBuild\WindowsNoEditor\Blocks\Binaries\Win64\Blocks.exe"
@@ -24,98 +28,58 @@ SETTINGS_PATH = r"C:\Users\Jacob\Documents\AirSim\settings.json"
 ENV_UE4_PATH = os.environ.get("UE4_PATH")
 ue4_default = ENV_UE4_PATH if ENV_UE4_PATH else DEFAULT_UE4_PATH
 
-
-def perception_worker(queue: MPQueue, flag) -> None:
-    """Capture images and compute optical flow in a separate process."""
-    from uav.perception import OpticalFlowTracker
-
-    feature_params = dict(maxCorners=150, qualityLevel=0.05, minDistance=5, blockSize=5)
-    lk_params = dict(
-        winSize=(15, 15),
-        maxLevel=2,
-        criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03),
-    )
-    tracker = OpticalFlowTracker(lk_params, feature_params)
-    last_vis_img = np.zeros((720, 1280, 3), dtype=np.uint8)
-
-    # Use a dedicated RPC client to avoid cross-process issues
-    local_client = airsim.MultirotorClient()
-    local_client.confirmConnection()
-
-    while not flag.is_set():
-        t0 = time.time()
-        responses = local_client.simGetImages([
-            ImageRequest("oakd_camera", ImageType.Scene, False, True)
-        ])
-        t_fetch_end = time.time()
-        response = responses[0]
-
-        if (
-            response.width == 0
-            or response.height == 0
-            or len(response.image_data_uint8) == 0
-        ):
-            data = (
-                last_vis_img,
-                np.array([]),
-                np.array([]),
-                0.0,
-                t_fetch_end - t0,
-                0.0,
-                0.0,
-            )
-        else:
-            img1d = np.frombuffer(response.image_data_uint8, dtype=np.uint8).copy()
-            img = cv2.imdecode(img1d, cv2.IMREAD_COLOR)
-            t_decode_end = time.time()
-            if img is None:
-                continue
-            img = cv2.resize(img, (1280, 720))
-            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            vis_img = img.copy()
-            last_vis_img = vis_img
-
-            if tracker.prev_gray is None:
-                tracker.initialize(gray)
-                data = (
-                    vis_img,
-                    np.array([]),
-                    np.array([]),
-                    0.0,
-                    t_fetch_end - t0,
-                    t_decode_end - t_fetch_end,
-                    0.0,
-                )
-            else:
-                t_proc_start = time.time()
-                good_old, flow_vectors, flow_std = tracker.process_frame(gray, t0)
-                processing_s = time.time() - t_proc_start
-                data = (
-                    vis_img,
-                    good_old,
-                    flow_vectors,
-                    flow_std,
-                    t_fetch_end - t0,
-                    t_decode_end - t_fetch_end,
-                    processing_s,
-                )
-
-        if queue.full():
-            try:
-                queue.get_nowait()
-            except Exception:
-                pass
-        queue.put(data)
+# === Configurable Constants ===
+MAX_FLOW_MAG = 10.0
+MAX_VECTOR_COMPONENT = 20.0
+MIN_FEATURES_PER_ZONE = 10
+GRACE_PERIOD_SEC = 1.0
+MAX_SIM_DURATION = 60  # seconds
+GOAL_X = 29  # meters
+GOAL_RADIUS = 1.0
 
 def main():
     parser = argparse.ArgumentParser(description="Optical flow navigation script")
     parser.add_argument("--manual-nudge", action="store_true", help="Enable manual nudge at frame 5 for testing")
+
+    parser.add_argument(
+        "--map",
+        choices=["reactive", "deliberative", "hybrid"],
+        default="reactive",
+        help="Which map to load (determines which .exe to launch)",
+    )
+
     parser.add_argument(
         "--ue4-path",
-        default=ue4_default,
-        help="Path to the Unreal Engine executable (or set UE4_PATH env variable)",
+        default=None,
+        help="Override the default path to the Unreal Engine executable",
     )
+
+    parser.add_argument(
+        "--goal-x",
+        type=float,
+        default=29.0,
+        help="X-coordinate goal threshold (default: 29.0)"
+    )
+
+    parser.add_argument(
+        "--max-duration",
+        type=float,
+        default=60.0,
+        help="Maximum simulation time in seconds (default: 60)"
+    )
+
     args = parser.parse_args()
+
+    ue4_paths = {
+        "reactive": r"H:\Documents\AirSimBuilds\Reactive\WindowsNoEditor\Blocks\Binaries\Win64\Blocks.exe",
+        "deliberative": r"H:\Documents\\AirSimBuilds\Deliberative\Blocks\Binaries\Win64\Blocks.exe",
+        "hybrid": r"H:\Documents\\AirSimBuilds\Hybrid\Blocks\Binaries\Win64\Blocks.exe"
+    }
+
+    if args.ue4_path:
+        ue4_exe = args.ue4_path
+    else:
+        ue4_exe = ue4_paths[args.map]
 
     from uav.interface import exit_flag, start_gui
     from uav.perception import FlowHistory
@@ -135,24 +99,38 @@ def main():
     start_gui(param_refs)
 
     # === LAUNCH UE4 SIMULATION ===
-    ue4_exe = args.ue4_path if args.ue4_path else DEFAULT_UE4_PATH
-    sim_process = None
-    try:
-        sim_process = subprocess.Popen([
-        DEFAULT_UE4_PATH,
+    map_launch_args = {
+        "reactive": "/Game/Maps/Map_Reactive",
+        "deliberative": "/Game/Maps/Map_Deliberative",
+        "hybrid": "/Game/Maps/Map_Hybrid"
+    }
+
+    exe_paths = {
+        "reactive": r"H:\Documents\AirSimBuilds\Reactive\WindowsNoEditor\Blocks\Binaries\Win64\Blocks.exe",
+        "deliberative": r"H:\Documents\AirSimBuilds\Deliberative\WindowsNoEditor\Blocks\Binaries\Win64\Blocks.exe",
+        "hybrid": r"H:\Documents\AirSimBuilds\Hybrid\WindowsNoEditor\Blocks\Binaries\Win64\Blocks.exe"
+    }
+
+    ue4_exe = exe_paths[args.map]
+    map_path = map_launch_args[args.map]
+
+    sim_cmd = [
+        ue4_exe,
         "-windowed",
         "-ResX=1280",
         "-ResY=720",
-        f"-settings={SETTINGS_PATH}"
-        ])
-        print("Launching Unreal Engine simulation...")
-        time.sleep(5)
-    except Exception as e:
-        print("Failed to launch UE4:", e)
+        f'-settings={SETTINGS_PATH}',
+        map_path
+    ]
+
+    print(f"Launching UE4 map '{args.map}'...")
+    sim_process = subprocess.Popen(sim_cmd)
+    time.sleep(5)  # wait for UE4 to boot up
 
     client = airsim.MultirotorClient()
     client.confirmConnection()
     print("Connected!")
+    print("Available vehicles:", client.listVehicles())
     client.enableApiControl(True)
     client.armDisarm(True)
 
@@ -176,8 +154,9 @@ def main():
 
     frame_count = 0
     start_time = time.time()
-    MAX_SIM_DURATION = 60  # seconds
-    GOAL_X = 29  # distance from start in AirSim coordinates
+    GOAL_X = args.goal_x
+    MAX_SIM_DURATION = args.max_duration
+    print(f"Config:\n  Goal X: {GOAL_X}m\n  Max Duration: {MAX_SIM_DURATION}s")
     GOAL_RADIUS = 1.0  # meters
     MIN_PROBE_FEATURES = 5
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -191,23 +170,17 @@ def main():
     retain_recent_logs("flow_logs")
 
     # Video writer setup
-    fourcc = cv2.VideoWriter_fourcc(*'MJPG')
+    try:
+        fourcc = cv2.VideoWriter_fourcc(*'MJPG') # type: ignore
+    except AttributeError:
+        fourcc = cv2.FOURCC(*'MJPG') # type: ignore
     # Capture at 720p for better optical flow tracking
     out = cv2.VideoWriter('flow_output.avi', fourcc, 8.0, (1280, 720))
 
     # Offload video writing to a background thread
     frame_queue: Queue = Queue(maxsize=20)
     
-    def video_worker() -> None:
-        while not exit_flag.is_set() or not frame_queue.empty():
-            frame = frame_queue.get()
-            if frame is None:
-                break
-            out.write(frame)
-            frame_queue.task_done()
-
-    video_thread = Thread(target=video_worker, daemon=True)
-    video_thread.start()
+    video_thread = start_video_writer_thread(frame_queue, out, exit_flag)
 
     # Perception thread for image capture and optical flow
     perception_queue: Queue = Queue(maxsize=1)
@@ -221,7 +194,7 @@ def main():
         request = [ImageRequest("oakd_camera", ImageType.Scene, False, True)]
         while not exit_flag.is_set():
             t0 = time.time()
-            responses = local_client.simGetImages(request)
+            responses = local_client.simGetImages(request, vehicle_name="UAV")
             t_fetch_end = time.time()
             response = responses[0]
             if (
@@ -292,12 +265,44 @@ def main():
 
     fps_list = []
     img = None  # Add this before your main loop
+    
+    grace_logged = False
+    startup_grace_over = False
 
     try:
         loop_start = time.time()
         while not exit_flag.is_set():
             frame_count += 1
             time_now = time.time()
+
+            # === Grace period (SKIPS perception AND nav logic entirely) ===
+            if not startup_grace_over:
+                if time_now - start_time < GRACE_PERIOD_SEC:
+                    param_refs['state'][0] = "startup_grace"
+                    if not grace_logged:
+                        print("⏳ Startup grace period active — waiting to start perception and nav")
+                        grace_logged = True
+                    time.sleep(0.05)
+                    continue
+                else:
+                    startup_grace_over = True
+                    print("🚀 Startup grace period complete — beginning full nav logic")
+
+            # === Retrieve perception results AFTER grace ===
+            try:
+                (
+                    vis_img,
+                    good_old,
+                    flow_vectors,
+                    flow_std,
+                    simgetimage_s,
+                    decode_s,
+                    processing_s,
+                ) = perception_queue.get(timeout=1.0)
+            except Exception:
+                continue
+
+
             prev_state = param_refs['state'][0]
             # Handle brief settle period after dodge
             if navigator.settling and time_now >= navigator.settle_end_time:
@@ -338,24 +343,30 @@ def main():
                 client.moveByVelocityAsync(2, 0, 0, 2)
 
             magnitudes = np.linalg.norm(flow_vectors, axis=1)
-            h, w = gray.shape
-            good_old = good_old.reshape(-1, 2)  # Ensure proper shape
-            x_coords = good_old[:, 0]
-            y_coords = good_old[:, 1]
 
-            left_mag = np.mean(magnitudes[x_coords < w // 3]) if np.any(x_coords < w // 3) else 0
-            center_band = (x_coords >= w // 3) & (x_coords < 2 * w // 3)
-            right_mag = np.mean(magnitudes[x_coords >= 2 * w // 3]) if np.any(x_coords >= 2 * w // 3) else 0
-            probe_band = y_coords < h // 3
-            probe_mag = np.mean(magnitudes[center_band & probe_band]) if np.any(center_band & probe_band) else 0
-            probe_count = int(np.sum(center_band & probe_band))
-            center_mag = np.mean(magnitudes[center_band]) if np.any(center_band) else 0
+            # Clamp extreme flow magnitudes (e.g., from sensor noise or motion blur)
+            num_clamped = np.sum(magnitudes > MAX_FLOW_MAG)
+            if num_clamped > 0:
+                print(f"⚠️ Clamped {num_clamped} large flow magnitudes to {MAX_FLOW_MAG}")
+            magnitudes = np.clip(magnitudes, 0, MAX_FLOW_MAG)
+
+            good_old = good_old.reshape(-1, 2)  # Ensure proper shape
+
+            (
+                left_mag, center_mag, right_mag,
+                probe_mag, probe_count,
+                left_count, center_count, right_count
+            ) = compute_region_stats(magnitudes, good_old, gray.shape[1])
 
             flow_history.update(left_mag, center_mag, right_mag)
             smooth_L, smooth_C, smooth_R = flow_history.average()
             param_refs['L'][0] = smooth_L
             param_refs['C'][0] = smooth_C
             param_refs['R'][0] = smooth_R
+
+            # Grace indicator
+            if navigator.just_resumed and time_now < navigator.resume_grace_end_time:
+                cv2.putText(vis_img, "GRACE", (1100, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 3)
 
             # Draw flow arrows for visualization
             for i, (p1, vec) in enumerate(zip(good_old, flow_vectors)):
@@ -364,18 +375,14 @@ def main():
                 x1, y1 = int(p1[0]), int(p1[1])
                 vec = np.ravel(vec)  # Ensure vec is 1D
                 if vec.shape[0] >= 2:
-                    dx, dy = float(vec[0]), float(vec[1])
+                    dx = float(np.clip(vec[0], -MAX_VECTOR_COMPONENT, MAX_VECTOR_COMPONENT))
+                    dy = float(np.clip(vec[1], -MAX_VECTOR_COMPONENT, MAX_VECTOR_COMPONENT))
                 else:
                     dx, dy = 0.0, 0.0
                 x2, y2 = int(x1 + dx), int(y1 + dy)
                 cv2.arrowedLine(vis_img, (x1, y1), (x2, y2), (0, 255, 0), 1, tipLength=0.3)
 
-            # Overlay info
-            pos, yaw, speed = get_drone_state(client)
-            cv2.putText(vis_img, f"Frame: {frame_count}", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255), 2)
-            cv2.putText(vis_img, f"Speed: {speed:.2f}", (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255), 2)
-            cv2.putText(vis_img, f"State: {param_refs['state'][0]}", (10, 85), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255), 2)
-            cv2.putText(vis_img, f"Sim Time: {time_now-start_time:.2f}s", (10, 115), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255), 2)
+            in_grace = navigator.just_resumed and time_now < navigator.resume_grace_end_time
 
             # === Navigation logic ===
             state_str = "none"
@@ -384,18 +391,37 @@ def main():
             probe_req = 0.0
             side_safe = False
 
+            # Minimum features per zone to consider valid
+
+            valid_L = left_count >= MIN_FEATURES_PER_ZONE
+            valid_C = center_count >= MIN_FEATURES_PER_ZONE
+            valid_R = right_count >= MIN_FEATURES_PER_ZONE
+
+            # === Weighted scoring (magnitude × count) ===
+            left_score, center_score, right_score = get_weighted_scores(
+                smooth_L, smooth_C, smooth_R,
+                left_count, center_count, right_count
+            )
+
+            print(f"📊 Weighted Scores — L: {left_score:.2f}, C: {center_score:.2f}, R: {right_score:.2f}")
+
+
             # Skip obstacle logic during grace period after resuming
-            if navigator.just_resumed and time_now < navigator.resume_grace_end_time:
-                param_refs['state'][0] = "resume_grace"
-                obstacle_detected = 0
-                # Still log flow and state, but don't issue new nav commands
-                try:
-                    frame_queue.put_nowait(vis_img)
-                except Exception:
-                    pass
-                continue
-            elif navigator.just_resumed and time_now >= navigator.resume_grace_end_time:
-                navigator.just_resumed = False  # Grace over
+            if in_grace_period(time_now, navigator):
+                    param_refs['state'][0] = "🕒 grace"
+                    obstacle_detected = 0
+
+                    # Always store frame first, even if queue is full
+                    try:
+                        frame_queue.get_nowait()
+                    except Exception:
+                        pass
+                    frame_queue.put(vis_img)
+
+                    continue  # Skip nav logic, but perception + video continues
+            else:
+                    navigator.just_resumed = False
+                    print("🟢 Grace period ended — navigation activated")
 
             if len(good_old) < 5: #If the number of "good" feature points tracked by the optical flow algorithm is less than 5, then...
                 if smooth_L > 1.5 and smooth_R > 1.5 and smooth_C < 0.2:
@@ -406,15 +432,18 @@ def main():
                 pos, yaw, speed = get_drone_state(client)
 
                 # Adaptive thresholds tuned for quicker reactions
-                brake_thres = 20 + 10 * speed
-                dodge_thres = 2 + 0.5 * speed
+                brake_thres, dodge_thres = compute_thresholds(speed)
 
-                center_high = smooth_C > dodge_thres or smooth_C > 2 * min(smooth_L, smooth_R)
+                center_high = valid_C and (smooth_C > dodge_thres or smooth_C > 2 * min(smooth_L, smooth_R))
                 side_diff = abs(smooth_L - smooth_R)
-                side_safe = side_diff > 0.3 * smooth_C and (smooth_L < 100 or smooth_R < 100)
+                side_safe = (
+                    valid_L and valid_R and
+                    abs(smooth_L - smooth_R) > 0.3 * smooth_C and
+                    (smooth_L < 100 or smooth_R < 100)
+                )
 
                 probe_reliable = probe_count > MIN_PROBE_FEATURES and probe_mag > 0.05
-                in_grace_period = time_now < navigator.grace_period_end_time
+                in_grace_period_flag = in_grace_period(time_now, navigator)
 
                 # === Priority 1: Severe brake override (ignores grace period)
                 if smooth_C > (brake_thres * 1.5):
@@ -433,8 +462,13 @@ def main():
 
                     # === Dodge Logic
                     elif center_high and side_safe:
-                        state_str = navigator.dodge(smooth_L, smooth_C, smooth_R)
+                        print(f"📊 Hybrid Scores — L: {left_score:.2f}, C: {center_score:.2f}, R: {right_score:.2f}")
+                        if left_score < right_score:
+                            state_str = navigator.dodge(smooth_L, smooth_C, smooth_R, direction='left')
+                        else:
+                            state_str = navigator.dodge(smooth_L, smooth_C, smooth_R, direction='right')
                         navigator.grace_period_end_time = time_now + 1.5
+
                     elif probe_mag < 0.5 and center_mag > 0.7:
                         if should_flat_wall_dodge(center_mag, probe_mag, probe_count, MIN_PROBE_FEATURES, flow_std, FLOW_STD_MAX):
                             print("🟥 Flat wall detected — attempting fallback dodge")
@@ -480,8 +514,6 @@ def main():
                 state_str = prev_state
             param_refs['state'][0] = state_str
             obstacle_detected = int('dodge' in state_str or state_str == 'brake')
-
-
 
             # === Detect repeated dodges with minimal progress ===
             pos_hist, _, _ = get_drone_state(client)
@@ -557,14 +589,27 @@ def main():
             pos, yaw, speed = get_drone_state(client)
             collision = client.simGetCollisionInfo()
             collided = int(getattr(collision, "has_collided", False))
-
-            log_buffer.append(
-                f"{frame_count},{time_now:.2f},{len(good_old)},"
-                f"{smooth_L:.3f},{smooth_C:.3f},{smooth_R:.3f},{flow_std:.3f},"
-                f"{pos.x_val:.2f},{pos.y_val:.2f},{pos.z_val:.2f},{yaw:.2f},{speed:.2f},{state_str},{collided},{obstacle_detected},{int(side_safe)},"
-                f"{brake_thres:.2f},{dodge_thres:.2f},{probe_req:.2f},{actual_fps:.2f},"
-                f"{simgetimage_s:.3f},{decode_s:.3f},{processing_s:.3f},{loop_elapsed:.3f}\n"
+            vis_img = draw_overlay(
+                vis_img, 
+                frame_count, 
+                speed, 
+                param_refs['state'][0], 
+                time_now - start_time, 
+                smooth_L, smooth_C, smooth_R, 
+                left_count, center_count, right_count, 
+                good_old,
+                flow_vectors,
+                in_grace=in_grace
             )
+
+            log_line = format_log_line(
+                frame_count, time_now, good_old, smooth_L, smooth_C, smooth_R, flow_std,
+                pos, yaw, speed, state_str, collided, obstacle_detected, side_safe,
+                brake_thres, dodge_thres, probe_req, actual_fps,
+                simgetimage_s, decode_s, processing_s, loop_elapsed
+            )
+            log_buffer.append(log_line)
+
             if frame_count % LOG_INTERVAL == 0:
                 log_file.writelines(log_buffer)
                 log_buffer.clear()
@@ -610,6 +655,11 @@ def main():
 
         if sim_process:
             sim_process.terminate()
+            try:
+                sim_process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                print("UE4 did not terminate gracefully, killing process...")
+                sim_process.kill()
             print("UE4 simulation closed.")
 
         # Re-encode video at median FPS using OpenCV
