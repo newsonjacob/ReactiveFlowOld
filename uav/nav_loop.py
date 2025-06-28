@@ -232,6 +232,8 @@ def process_perception_data(
         logger.info("Manual nudge forward for test")
         client.moveByVelocityAsync(2, 0, 0, 2)
 
+    if flow_vectors.ndim == 1:
+        flow_vectors = flow_vectors.reshape(-1, 2)
     magnitudes = np.linalg.norm(flow_vectors, axis=1)
     num_clamped = np.sum(magnitudes > max_flow_mag)
     if num_clamped > 0:

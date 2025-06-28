@@ -2,11 +2,7 @@
 """Navigation utilities for issuing motion commands to an AirSim drone."""
 import time
 import math
-import logging
 import airsim
-
-logger = logging.getLogger(__name__)
-
 
 class Navigator:
     """Issue high level movement commands and track state."""
@@ -34,17 +30,15 @@ class Navigator:
 
     def brake(self):
         """Stop the drone immediately."""
-        logger.info("\U0001F6D1 Braking")
+        print("🛑 Braking")
         self.client.moveByVelocityAsync(0, 0, 0, 1)
         self.braked = True
         return "brake"
 
     def dodge(self, smooth_L, smooth_C, smooth_R, duration: float = 2.0, direction: str = None):
-        logger.info(
-            "\U0001F50D Dodge Decision — L: %.1f, C: %.1f, R: %.1f",
-            smooth_L,
-            smooth_C,
-            smooth_R,
+        print(
+            f"🔍 Dodge Decision — L: {smooth_L:.1f}, "
+            f"C: {smooth_C:.1f}, R: {smooth_R:.1f}"
         )
 
         # Allow external override of dodge direction (used in hybrid scoring)
@@ -58,16 +52,12 @@ class Navigator:
                 direction = "right"
             elif left_safe and right_safe:
                 direction = "left" if smooth_L <= smooth_R else "right"
-                logger.warning(
-                    "\u26A0\uFE0F Both sides okay — picking %s", direction
-                )
+                print(f"⚠️ Both sides okay — picking {direction}")
             else:
                 direction = "left" if smooth_L <= smooth_R else "right"
-                logger.warning(
-                    "\u26A0\uFE0F No safe sides — forcing %s", direction
-                )
+                print(f"⚠️ No safe sides — forcing {direction}")
         else:
-            logger.info("\U0001F4E3 Dodge direction forced by caller: %s", direction)
+            print(f"📣 Dodge direction forced by caller: {direction}")
 
         lateral = 1.0 if direction == "right" else -1.0
         strength = 0.5 if max(smooth_L, smooth_R) > 100 else 1.0
@@ -76,11 +66,9 @@ class Navigator:
         # Stop before dodging
         self.brake()
 
-        logger.info(
-            "\U0001F500 Dodging %s (strength %.1f, forward %.1f)",
-            direction,
-            strength,
-            forward_speed,
+        print(
+            f"🔀 Dodging {direction} (strength {strength:.1f}, "
+            f"forward {forward_speed:.1f})"
         )
         self.client.moveByVelocityBodyFrameAsync(
             forward_speed,
@@ -98,7 +86,7 @@ class Navigator:
 
     def resume_forward(self):
         """Resume normal forward velocity."""
-        logger.info("\u2705 Resuming forward motion")
+        print("✅ Resuming forward motion")
         self.client.moveByVelocityAsync(2, 0, 0, duration=3,
             drivetrain=airsim.DrivetrainType.ForwardOnly,
             yaw_mode=airsim.YawMode(False, 0))
@@ -107,13 +95,11 @@ class Navigator:
         self.just_resumed = True
         self.resume_grace_end_time = time.time() + 0.75  # 0.75 second grace
         self.last_movement_time = time.time()
-        return "resume"
+        return "resume_forward"
 
     def blind_forward(self):
         """Move forward when no features are detected."""
-        logger.warning(
-            "\u26A0\uFE0F No features — continuing blind forward motion"
-        )
+        print("⚠️ No features — continuing blind forward motion")
         self.client.moveByVelocityAsync(
             2,
             0,
@@ -127,16 +113,14 @@ class Navigator:
 
     def nudge(self):
         """Gently push the drone forward when stalled."""
-        logger.warning(
-            "\u26A0\uFE0F Low flow + zero velocity — nudging forward"
-        )
+        print("⚠️ Low flow + zero velocity — nudging forward")
         self.client.moveByVelocityAsync(0.5, 0, 0, 1)
         self.last_movement_time = time.time()
         return "nudge"
 
     def reinforce(self):
         """Reissue the forward command to reinforce motion."""
-        logger.info("\U0001F501 Reinforcing forward motion")
+        print("🔁 Reinforcing forward motion")
         self.client.moveByVelocityAsync(
             2, 0, 0,
             duration=3,
@@ -151,13 +135,13 @@ class Navigator:
             self.just_resumed = True
             self.resume_grace_end_time = time.time() + 1.0
             self.grace_used = True
-            logger.info("\U0001F552 Grace period started (first movement only)")
+            print("🕒 Grace period started (first movement only)")
 
         return "resume_reinforce"
 
     def timeout_recover(self):
         """Move slowly forward after a command timeout."""
-        logger.warning("\u23F3 Timeout — forcing recovery motion")
+        print("⏳ Timeout — forcing recovery motion")
         self.client.moveByVelocityAsync(0.5, 0, 0, 1)
         self.last_movement_time = time.time()
         return "timeout_nudge"
