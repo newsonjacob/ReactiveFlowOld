@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+from uav import config
 
 def draw_overlay(vis_img, frame_count, speed, state, sim_time,
                  smooth_L, smooth_C, smooth_R,
@@ -15,9 +16,10 @@ def draw_overlay(vis_img, frame_count, speed, state, sim_time,
         if i > 50:
             break
         x1, y1 = int(p1[0]), int(p1[1])
-        vec = np.ravel(vec)  # flatten safely
+        vec = np.ravel(vec)
         if vec.shape[0] >= 2:
-            dx, dy = float(vec[0]), float(vec[1])
+            dx = float(np.clip(vec[0], -config.MAX_VECTOR_COMPONENT, config.MAX_VECTOR_COMPONENT))
+            dy = float(np.clip(vec[1], -config.MAX_VECTOR_COMPONENT, config.MAX_VECTOR_COMPONENT))
         else:
             dx, dy = 0.0, 0.0
         x2, y2 = int(x1 + dx), int(y1 + dy)
