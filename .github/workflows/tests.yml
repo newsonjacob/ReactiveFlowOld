@@ -16,6 +16,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install numpy
+          pip install --no-build-isolation airsim
           pip install -r requirements.txt
           pip install -e .
       - name: Run tests
