@@ -15,7 +15,7 @@ jobs:
           python-version: '3.10'
       - name: Install dependencies
         run: |
-          pip install numpy
+          pip install numpy msgpack-rpc-python
           pip install --no-build-isolation airsim
           pip install -r requirements.txt
           pip install -e .
