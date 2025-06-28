@@ -13,3 +13,10 @@ LOG_INTERVAL = 5
 VIDEO_FPS = 8.0
 VIDEO_SIZE = (1280, 720)
 VIDEO_OUTPUT = 'flow_output.avi'
+
+def load_app_config(config_path: str = "config.ini"):
+    """Load application config from an INI file."""
+    import configparser
+    parser = configparser.ConfigParser()
+    parser.read(config_path)
+    return parser
