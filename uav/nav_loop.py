@@ -475,19 +475,6 @@ def navigation_loop(args, client, ctx):
             if navigator.just_resumed and time_now < navigator.resume_grace_end_time:
                 cv2.putText(vis_img, "GRACE", (1100, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 3)
 
-            for i, (p1, vec) in enumerate(zip(good_old, flow_vectors)):
-                if i > 50:
-                    break
-                x1, y1 = int(p1[0]), int(p1[1])
-                vec = np.ravel(vec)
-                if vec.shape[0] >= 2:
-                    dx = float(np.clip(vec[0], -MAX_VECTOR_COMPONENT, MAX_VECTOR_COMPONENT))
-                    dy = float(np.clip(vec[1], -MAX_VECTOR_COMPONENT, MAX_VECTOR_COMPONENT))
-                else:
-                    dx, dy = 0.0, 0.0
-                x2, y2 = int(x1 + dx), int(y1 + dy)
-                cv2.arrowedLine(vis_img, (x1, y1), (x2, y2), (0, 255, 0), 1, tipLength=0.3)
-
             in_grace = navigator.just_resumed and time_now < navigator.resume_grace_end_time
 
             state_str, obstacle_detected, side_safe, brake_thres, dodge_thres, probe_req = navigation_step(
