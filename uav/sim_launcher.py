@@ -1,0 +1,32 @@
+import subprocess
+import time
+
+def launch_sim(args, settings_path):
+    map_launch_args = {
+        "reactive": "/Game/Maps/Map_Reactive",
+        "deliberative": "/Game/Maps/Map_Deliberative",
+        "hybrid": "/Game/Maps/Map_Hybrid"
+    }
+
+    exe_paths = {
+        "reactive": r"H:\Documents\AirSimBuilds\Reactive\WindowsNoEditor\Blocks\Binaries\Win64\Blocks.exe",
+        "deliberative": r"H:\Documents\AirSimBuilds\Deliberative\WindowsNoEditor\Blocks\Binaries\Win64\Blocks.exe",
+        "hybrid": r"H:\Documents\AirSimBuilds\Hybrid\WindowsNoEditor\Blocks\Binaries\Win64\Blocks.exe"
+    }
+
+    ue4_exe = args.ue4_path if args.ue4_path else exe_paths[args.map]
+    map_path = map_launch_args[args.map]
+
+    sim_cmd = [
+        ue4_exe,
+        "-windowed",
+        "-ResX=1280",
+        "-ResY=720",
+        f'-settings={settings_path}',
+        map_path
+    ]
+
+    print(f"🚀 Launching UE4 map '{args.map}'...")
+    sim_process = subprocess.Popen(sim_cmd)
+    time.sleep(5)  # Give UE4 time to boot up
+    return sim_process

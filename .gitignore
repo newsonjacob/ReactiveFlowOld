@@ -14,7 +14,7 @@ __pycache__/
 *.wmv
 
 # Flow logs
-
+.html
 # IDE directories
 .vscode/
 .idea/
@@ -29,3 +29,4 @@ Thumbs.db
 
 # Backup files
 *~
+

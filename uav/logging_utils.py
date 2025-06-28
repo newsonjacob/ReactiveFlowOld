@@ -1,4 +1,4 @@
-def format_log_entry(
+def format_log_line(
     frame_count, time_now, good_old, smooth_L, smooth_C, smooth_R, flow_std,
     pos, yaw, speed, state_str, collided, obstacle_detected, side_safe,
     brake_thres, dodge_thres, probe_req, actual_fps,
