@@ -1,1 +1,0 @@
-frame,time,features,flow_left,flow_center,flow_right,flow_std,pos_x,pos_y,pos_z,yaw,speed,state,collided,obstacle,side_safe,brake_thres,dodge_thres,probe_req,fps,simgetimage_s,decode_s,processing_s,loop_s

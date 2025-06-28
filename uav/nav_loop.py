@@ -19,7 +19,7 @@ from uav.logging_utils import format_log_line
 from uav.perception import OpticalFlowTracker
 from uav.state_checks import in_grace_period
 from uav.scoring import get_weighted_scores, compute_region_stats
-from uav.utils import FLOW_STD_MAX
+from uav.utils import FLOW_STD_MAX, get_drone_state, should_flat_wall_dodge
 from uav import config
 
 logger = logging.getLogger(__name__)
