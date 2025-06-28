@@ -16,10 +16,12 @@ from uav.overlay import draw_overlay
 from uav.navigation_rules import compute_thresholds
 from uav.video_utils import start_video_writer_thread
 from uav.logging_utils import format_log_line
-from uav.perception import OpticalFlowTracker
+from uav.perception import OpticalFlowTracker, FlowHistory
+from uav.navigation import Navigator
 from uav.state_checks import in_grace_period
 from uav.scoring import get_weighted_scores, compute_region_stats
-from uav.utils import FLOW_STD_MAX
+from uav.utils import FLOW_STD_MAX, get_drone_state, retain_recent_logs, should_flat_wall_dodge
+from analysis.utils import retain_recent_views
 from uav import config
 
 logger = logging.getLogger(__name__)
@@ -196,29 +198,22 @@ def write_video_frame(queue, frame):
     except Exception:
         pass
 
-def run_navigation(args, client, sim_process, SETTINGS_PATH):
-    MAX_FLOW_MAG = config.MAX_FLOW_MAG
-    MAX_VECTOR_COMPONENT = config.MAX_VECTOR_COMPONENT
-    MIN_FEATURES_PER_ZONE = config.MIN_FEATURES_PER_ZONE
-    GRACE_PERIOD_SEC = config.GRACE_PERIOD_SEC
+def setup_environment(args, client):
+    """Initialize the navigation environment and return a context dict."""
     MAX_SIM_DURATION = config.MAX_SIM_DURATION
     GOAL_X = config.GOAL_X
-    GOAL_RADIUS = config.GOAL_RADIUS
 
     from uav.interface import exit_flag, start_gui
-    from uav.perception import FlowHistory
-    from uav.navigation import Navigator
-    from uav.utils import get_drone_state, retain_recent_logs, should_flat_wall_dodge
-    from analysis.utils import retain_recent_views
+    from uav.utils import retain_recent_logs
 
     # GUI parameter and status holders
     param_refs = {
-            'L': [0.0],
-            'C': [0.0],
-            'R': [0.0],
-            'state': [''],
-            'reset_flag': [False]
-        }
+        'L': [0.0],
+        'C': [0.0],
+        'R': [0.0],
+        'state': [''],
+        'reset_flag': [False]
+    }
     start_gui(param_refs)
 
     logger.info("Available vehicles: %s", client.listVehicles())
@@ -232,7 +227,7 @@ def run_navigation(args, client, sim_process, SETTINGS_PATH):
     # Tune feature detection to pick up more corners even on smooth surfaces
     feature_params = dict(maxCorners=150, qualityLevel=0.05, minDistance=5, blockSize=5)
     lk_params = dict(winSize=(15, 15), maxLevel=2,
-                        criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03))
+                     criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03))
     tracker = OpticalFlowTracker(lk_params, feature_params)
     flow_history = FlowHistory()
     navigator = Navigator(client)
@@ -240,15 +235,12 @@ def run_navigation(args, client, sim_process, SETTINGS_PATH):
     state_history = deque(maxlen=3)
     pos_history = deque(maxlen=3)
 
-    frame_count = 0
     start_time = time.time()
     GOAL_X = args.goal_x
     MAX_SIM_DURATION = args.max_duration
     logger.info(
         "Config:\n  Goal X: %sm\n  Max Duration: %ss", GOAL_X, MAX_SIM_DURATION
     )
-    GOAL_RADIUS = config.GOAL_RADIUS
-    MIN_PROBE_FEATURES = config.MIN_PROBE_FEATURES
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     os.makedirs("flow_logs", exist_ok=True)
     log_file = open(f"flow_logs/full_log_{timestamp}.csv", 'w')
@@ -261,26 +253,47 @@ def run_navigation(args, client, sim_process, SETTINGS_PATH):
 
     # Video writer setup
     try:
-        fourcc = cv2.VideoWriter_fourcc(*'MJPG') # type: ignore
+        fourcc = cv2.VideoWriter_fourcc(*'MJPG')  # type: ignore
     except AttributeError:
-        fourcc = cv2.FOURCC(*'MJPG') # type: ignore
-    # Capture at 720p for better optical flow tracking
+        fourcc = cv2.FOURCC(*'MJPG')  # type: ignore
     out = cv2.VideoWriter(
         config.VIDEO_OUTPUT, fourcc, config.VIDEO_FPS, config.VIDEO_SIZE
     )
 
-    # Offload video writing to a background thread
     frame_queue: Queue = Queue(maxsize=20)
-    
     video_thread = start_video_writer_thread(frame_queue, out, exit_flag)
 
-    # Perception thread for image capture and optical flow
+    ctx = {
+        'exit_flag': exit_flag,
+        'param_refs': param_refs,
+        'tracker': tracker,
+        'flow_history': flow_history,
+        'navigator': navigator,
+        'state_history': state_history,
+        'pos_history': pos_history,
+        'frame_queue': frame_queue,
+        'video_thread': video_thread,
+        'out': out,
+        'log_file': log_file,
+        'log_buffer': [],
+        'timestamp': timestamp,
+        'start_time': start_time,
+        'fps_list': [],
+        'fourcc': fourcc,
+    }
+    return ctx
+
+
+def start_perception_thread(ctx):
+    """Launch background perception thread."""
+    exit_flag = ctx['exit_flag']
+    tracker = ctx['tracker']
+
     perception_queue: Queue = Queue(maxsize=1)
     last_vis_img = np.zeros((720, 1280, 3), dtype=np.uint8)
-    
+
     def perception_worker() -> None:
         nonlocal last_vis_img
-        # Use a dedicated RPC client to avoid cross-thread issues
         local_client = airsim.MultirotorClient()
         local_client.confirmConnection()
         request = [ImageRequest("oakd_camera", ImageType.Scene, False, True)]
@@ -328,23 +341,46 @@ def run_navigation(args, client, sim_process, SETTINGS_PATH):
             try:
                 perception_queue.put(data, block=False)
             except Exception:
-                # Drop frame if queue already contains an item
                 pass
 
     perception_thread = Thread(target=perception_worker, daemon=True)
     perception_thread.start()
 
-    # Buffer log lines to throttle disk writes
-    log_buffer = []
-    LOG_INTERVAL = config.LOG_INTERVAL  # flush every n frames
+    ctx['perception_queue'] = perception_queue
+    ctx['perception_thread'] = perception_thread
 
+
+def navigation_loop(args, client, ctx):
+    """Main navigation loop processing perception results."""
+    exit_flag = ctx['exit_flag']
+    flow_history = ctx['flow_history']
+    navigator = ctx['navigator']
+    param_refs = ctx['param_refs']
+    state_history = ctx['state_history']
+    pos_history = ctx['pos_history']
+    perception_queue = ctx['perception_queue']
+    frame_queue = ctx['frame_queue']
+    video_thread = ctx['video_thread']
+    out = ctx['out']
+    log_file = ctx['log_file']
+    log_buffer = ctx['log_buffer']
+    start_time = ctx['start_time']
+    timestamp = ctx['timestamp']
+    fps_list = ctx['fps_list']
+    fourcc = ctx['fourcc']
+
+    MAX_FLOW_MAG = config.MAX_FLOW_MAG
+    MAX_VECTOR_COMPONENT = config.MAX_VECTOR_COMPONENT
+    GRACE_PERIOD_SEC = config.GRACE_PERIOD_SEC
+    MAX_SIM_DURATION = args.max_duration
+    GOAL_X = args.goal_x
+    GOAL_RADIUS = config.GOAL_RADIUS
+
+    frame_count = 0
 
     target_fps = config.TARGET_FPS
     frame_duration = 1.0 / target_fps
 
-    fps_list = []
-    img = None  # Add this before your main loop
-    
     grace_logged = False
     startup_grace_over = False
 
@@ -354,7 +390,6 @@ def run_navigation(args, client, sim_process, SETTINGS_PATH):
             frame_count += 1
             time_now = time.time()
 
-            # === Grace period (SKIPS perception AND nav logic entirely) ===
             if not startup_grace_over:
                 if time_now - start_time < GRACE_PERIOD_SEC:
                     param_refs['state'][0] = "startup_grace"
@@ -367,7 +402,6 @@ def run_navigation(args, client, sim_process, SETTINGS_PATH):
                     startup_grace_over = True
                     logger.info("Startup grace period complete — beginning full nav logic")
 
-            # === Retrieve perception results AFTER grace ===
             try:
                 (
                     vis_img,
@@ -381,9 +415,7 @@ def run_navigation(args, client, sim_process, SETTINGS_PATH):
             except Exception:
                 continue
 
-
             prev_state = param_refs['state'][0]
-            # Handle brief settle period after dodge
             if navigator.settling and time_now >= navigator.settle_end_time:
                 logger.info("Settle period over — resuming evaluation")
                 navigator.settling = False
@@ -397,7 +429,6 @@ def run_navigation(args, client, sim_process, SETTINGS_PATH):
                 logger.info("Goal reached — landing.")
                 break
 
-            # --- Retrieve perception results ---
             try:
                 (
                     vis_img,
@@ -422,14 +453,12 @@ def run_navigation(args, client, sim_process, SETTINGS_PATH):
                 client.moveByVelocityAsync(2, 0, 0, 2)
 
             magnitudes = np.linalg.norm(flow_vectors, axis=1)
-
-            # Clamp extreme flow magnitudes (e.g., from sensor noise or motion blur)
             num_clamped = np.sum(magnitudes > MAX_FLOW_MAG)
             if num_clamped > 0:
                 logger.warning("Clamped %d large flow magnitudes to %s", num_clamped, MAX_FLOW_MAG)
             magnitudes = np.clip(magnitudes, 0, MAX_FLOW_MAG)
 
-            good_old = good_old.reshape(-1, 2)  # Ensure proper shape
+            good_old = good_old.reshape(-1, 2)
 
             (
                 left_mag, center_mag, right_mag,
@@ -443,16 +472,14 @@ def run_navigation(args, client, sim_process, SETTINGS_PATH):
             param_refs['C'][0] = smooth_C
             param_refs['R'][0] = smooth_R
 
-            # Grace indicator
             if navigator.just_resumed and time_now < navigator.resume_grace_end_time:
                 cv2.putText(vis_img, "GRACE", (1100, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 3)
 
-            # Draw flow arrows for visualization
             for i, (p1, vec) in enumerate(zip(good_old, flow_vectors)):
                 if i > 50:
                     break
                 x1, y1 = int(p1[0]), int(p1[1])
-                vec = np.ravel(vec)  # Ensure vec is 1D
+                vec = np.ravel(vec)
                 if vec.shape[0] >= 2:
                     dx = float(np.clip(vec[0], -MAX_VECTOR_COMPONENT, MAX_VECTOR_COMPONENT))
                     dy = float(np.clip(vec[1], -MAX_VECTOR_COMPONENT, MAX_VECTOR_COMPONENT))
@@ -488,7 +515,6 @@ def run_navigation(args, client, sim_process, SETTINGS_PATH):
                 param_refs,
             )
 
-            # === Reset logic from GUI ===
             if param_refs['reset_flag'][0]:
                 logger.info("Resetting simulation...")
                 try:
@@ -506,13 +532,14 @@ def run_navigation(args, client, sim_process, SETTINGS_PATH):
                 frame_count = 0
                 param_refs['reset_flag'][0] = False
 
-                # === Reset log file ===
                 if log_buffer:
                     log_file.writelines(log_buffer)
                     log_buffer.clear()
                 log_file.close()
-                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                ctx['timestamp'] = datetime.now().strftime('%Y%m%d_%H%M%S')
+                timestamp = ctx['timestamp']
                 log_file = open(f"flow_logs/full_log_{timestamp}.csv", 'w')
+                ctx['log_file'] = log_file
                 log_file.write(
                     "frame,time,features,flow_left,flow_center,flow_right,"
                     "flow_std,pos_x,pos_y,pos_z,yaw,speed,state,collided,obstacle,side_safe,"
@@ -520,21 +547,20 @@ def run_navigation(args, client, sim_process, SETTINGS_PATH):
                 )
                 retain_recent_logs("flow_logs")
 
-                # === Reset video writer ===
                 frame_queue.put(None)
                 video_thread.join()
                 out.release()
                 out = cv2.VideoWriter(
                     config.VIDEO_OUTPUT, fourcc, config.VIDEO_FPS, config.VIDEO_SIZE
                 )
+                ctx['out'] = out
                 video_thread = Thread(target=video_worker, daemon=True)
                 video_thread.start()
+                ctx['video_thread'] = video_thread
                 continue
 
-            # Queue frame for async video writing
             write_video_frame(frame_queue, vis_img)
 
-            # Throttle loop to target FPS
             elapsed = time.time() - loop_start
             if elapsed < frame_duration:
                 time.sleep(frame_duration - elapsed)
@@ -548,13 +574,13 @@ def run_navigation(args, client, sim_process, SETTINGS_PATH):
             collision = client.simGetCollisionInfo()
             collided = int(getattr(collision, "has_collided", False))
             vis_img = draw_overlay(
-                vis_img, 
-                frame_count, 
-                speed, 
-                param_refs['state'][0], 
-                time_now - start_time, 
-                smooth_L, smooth_C, smooth_R, 
-                left_count, center_count, right_count, 
+                vis_img,
+                frame_count,
+                speed,
+                param_refs['state'][0],
+                time_now - start_time,
+                smooth_L, smooth_C, smooth_R,
+                left_count, center_count, right_count,
                 good_old,
                 flow_vectors,
                 in_grace=in_grace
@@ -574,72 +600,92 @@ def run_navigation(args, client, sim_process, SETTINGS_PATH):
     except KeyboardInterrupt:
         logger.info("Interrupted.")
 
-    finally:
-        logger.info("Landing...")
-        if log_buffer:
-            log_file.writelines(log_buffer)
-            log_buffer.clear()
-        log_file.close()
-        exit_flag.set()
-        frame_queue.put(None)
-        video_thread.join()
+
+def cleanup(client, sim_process, ctx):
+    """Clean up resources and land the drone."""
+    exit_flag = ctx['exit_flag']
+    frame_queue = ctx['frame_queue']
+    video_thread = ctx['video_thread']
+    perception_thread = ctx.get('perception_thread')
+    out = ctx['out']
+    log_file = ctx['log_file']
+    log_buffer = ctx['log_buffer']
+    timestamp = ctx['timestamp']
+    fps_list = ctx['fps_list']
+
+    logger.info("Landing...")
+    if log_buffer:
+        log_file.writelines(log_buffer)
+        log_buffer.clear()
+    log_file.close()
+    exit_flag.set()
+    frame_queue.put(None)
+    video_thread.join()
+    if perception_thread:
         perception_thread.join()
-        out.release()
+    out.release()
+    try:
+        client.landAsync().join()
+        client.armDisarm(False)
+        client.enableApiControl(False)
+    except Exception as e:
+        logger.error("Landing error: %s", e)
+    try:
+        html_output = f"analysis/flight_view_{timestamp}.html"
+        subprocess.run([
+            "python", "analysis/visualize_flight.py",
+            "--log", f"flow_logs/full_log_{timestamp}.csv",
+            "--obstacles", "analysis/obstacles.json",
+            "--output", html_output,
+            "--scale", "1.0"
+        ])
+        logger.info("3D visualisation saved to %s", html_output)
+        retain_recent_views("analysis")
+        retain_recent_logs("flow_logs")
+    except Exception as e:
+        logger.warning("Visualization failed: %s", e)
+
+    if sim_process:
+        sim_process.terminate()
         try:
-            client.landAsync().join()
-            client.armDisarm(False)
-            client.enableApiControl(False)
-        except Exception as e:
-            logger.error("Landing error: %s", e)
-        # === Auto-generate 3D flight visualisation ===
-        try:
-            html_output = f"analysis/flight_view_{timestamp}.html"
-            subprocess.run([
-                "python", "analysis/visualize_flight.py",
-                "--log", f"flow_logs/full_log_{timestamp}.csv",
-                "--obstacles", "analysis/obstacles.json",
-                "--output", html_output,
-                "--scale", "1.0"
-            ])
-            logger.info("3D visualisation saved to %s", html_output)
-            retain_recent_views("analysis")
-            retain_recent_logs("flow_logs")
-        except Exception as e:
-            logger.warning("Visualization failed: %s", e)
+            sim_process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            logger.warning("UE4 did not terminate gracefully, killing process...")
+            sim_process.kill()
+        logger.info("UE4 simulation closed.")
 
-        if sim_process:
-            sim_process.terminate()
-            try:
-                sim_process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                logger.warning("UE4 did not terminate gracefully, killing process...")
-                sim_process.kill()
-            logger.info("UE4 simulation closed.")
+    import statistics
+    if len(fps_list) > 0:
+        median_fps = statistics.median(fps_list)
+        logger.info("Median FPS: %.2f", median_fps)
 
-        # Re-encode video at median FPS using OpenCV
-        import statistics
-        if len(fps_list) > 0:
-            median_fps = statistics.median(fps_list)
-            logger.info("Median FPS: %.2f", median_fps)
+        input_video = config.VIDEO_OUTPUT
+        output_video = 'flow_output_fixed.avi'
 
-            input_video = config.VIDEO_OUTPUT
-            output_video = 'flow_output_fixed.avi'
+        cap = cv2.VideoCapture(input_video)
+        fourcc = cv2.VideoWriter_fourcc(*'MJPG')
+        out_fixed = cv2.VideoWriter(output_video, fourcc, median_fps, (1280, 720))
 
-            cap = cv2.VideoCapture(input_video)
-            fourcc = cv2.VideoWriter_fourcc(*'MJPG')
-            out_fixed = cv2.VideoWriter(output_video, fourcc, median_fps, (1280, 720))
+        frame_count = 0
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            out_fixed.write(frame)
+            frame_count += 1
 
-            frame_count = 0
-            while True:
-                ret, frame = cap.read()
-                if not ret:
-                    break
-                out_fixed.write(frame)
-                frame_count += 1
+        cap.release()
+        out_fixed.release()
+        logger.info(
+            "Re-encoded %d frames at %.2f FPS to %s", frame_count, median_fps, output_video
+        )
 
-            cap.release()
-            out_fixed.release()
-            logger.info(
-                "Re-encoded %d frames at %.2f FPS to %s", frame_count, median_fps, output_video
-            )
 
+def run_navigation(args, client, sim_process, SETTINGS_PATH):
+    """Entry point used by main.py for running the full navigation loop."""
+    ctx = setup_environment(args, client)
+    start_perception_thread(ctx)
+    try:
+        navigation_loop(args, client, ctx)
+    finally:
+        cleanup(client, sim_process, ctx)
