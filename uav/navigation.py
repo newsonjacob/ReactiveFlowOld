@@ -96,7 +96,7 @@ class Navigator:
         self.just_resumed = True
         self.resume_grace_end_time = time.time() + 0.75  # 0.75 second grace
         self.last_movement_time = time.time()
-        return "resume_forward"
+        return "resume"
 
     def blind_forward(self):
         """Move forward when no features are detected."""
