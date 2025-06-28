@@ -1,10 +1,12 @@
 import subprocess
 import time
 import logging
+from configparser import ConfigParser
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-def launch_sim(args, settings_path):
+def launch_sim(args, settings_path, config: Optional[ConfigParser] = None):
     map_launch_args = {
         "reactive": "/Game/Maps/Map_Reactive",
         "deliberative": "/Game/Maps/Map_Deliberative",
@@ -12,12 +14,19 @@ def launch_sim(args, settings_path):
     }
 
     exe_paths = {
-        "reactive": r"H:\Documents\AirSimBuilds\Reactive\WindowsNoEditor\Blocks\Binaries\Win64\Blocks.exe",
-        "deliberative": r"H:\Documents\AirSimBuilds\Deliberative\WindowsNoEditor\Blocks\Binaries\Win64\Blocks.exe",
-        "hybrid": r"H:\Documents\AirSimBuilds\Hybrid\WindowsNoEditor\Blocks\Binaries\Win64\Blocks.exe"
+        "reactive": r"H:\\Documents\\AirSimBuilds\\Reactive\\WindowsNoEditor\\Blocks\\Binaries\\Win64\\Blocks.exe",
+        "deliberative": r"H:\\Documents\\AirSimBuilds\\Deliberative\\WindowsNoEditor\\Blocks\\Binaries\\Win64\\Blocks.exe",
+        "hybrid": r"H:\\Documents\\AirSimBuilds\\Hybrid\\WindowsNoEditor\\Blocks\\Binaries\\Win64\\Blocks.exe"
     }
 
-    ue4_exe = args.ue4_path if args.ue4_path else exe_paths[args.map]
+    config_exe = None
+    if config is not None:
+        try:
+            config_exe = config.get("ue4", args.map)
+        except Exception:
+            config_exe = None
+
+    ue4_exe = args.ue4_path or config_exe or exe_paths[args.map]
     map_path = map_launch_args[args.map]
 
     sim_cmd = [

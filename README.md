@@ -76,9 +76,19 @@ This repository contains the implementation of a reactive obstacle avoidance sys
 
 4. Build your Unreal map and generate a packaged `.exe` (e.g. `Blocks.exe`).
 
-5. Run the system:
+5. Edit `config.ini` to point to your AirSim `settings.json` and UE4 executables. These values will be used unless overridden on the command line.
+
+6. Run the system:
    ```bash
    python main.py
+   ```
+   You can override paths at runtime:
+   ```bash
+   python main.py --settings-path C:\path\to\settings.json --ue4-path C:\path\to\Blocks.exe
+   ```
+   To load a different configuration file:
+   ```bash
+   python main.py --config custom.ini
    ```
 
 ---
