@@ -123,6 +123,10 @@ class Navigator:
             yaw_mode=airsim.YawMode(False, 0),
         )
         self.last_movement_time = time.time()
+        if not self.grace_used:
+            self.just_resumed = True
+            self.resume_grace_end_time = time.time() + 1.0
+            self.grace_used = True
         return "blind_forward"
 
     def nudge(self):
