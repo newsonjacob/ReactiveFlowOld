@@ -44,7 +44,7 @@ def perception_loop(tracker, image):
 
 def navigation_step(
     client, navigator, flow_history, good_old, flow_vectors, flow_std,
-    smooth_L, smooth_C, smooth_R, probe_mag, probe_count,
+    smooth_L, smooth_C, smooth_R, delta_C, probe_mag, probe_count,
     left_count, center_count, right_count, frame_queue, vis_img,
     time_now, frame_count, prev_state, state_history, pos_history, param_refs
 ):
@@ -99,7 +99,19 @@ def navigation_step(
         probe_reliable = probe_count > config.MIN_PROBE_FEATURES and probe_mag > 0.05
 
         # --- Obstacle Handling ---
-        if smooth_C > (brake_thres * 1.5):
+        sudden_rise = delta_C > 0.2
+        if sudden_rise:
+            logger.debug("Sudden delta_C %.2f", delta_C)
+            if center_high and side_safe:
+                if smooth_L < smooth_R:
+                    state_str = navigator.dodge(smooth_L, smooth_C, smooth_R, direction='left')
+                else:
+                    state_str = navigator.dodge(smooth_L, smooth_C, smooth_R, direction='right')
+                navigator.grace_period_end_time = time_now + 1.5
+            elif smooth_C > brake_thres * 0.5:
+                state_str = navigator.brake()
+                navigator.grace_period_end_time = time_now + 1.5
+        elif smooth_C > (brake_thres * 1.5):
             state_str = navigator.brake()
             navigator.grace_period_end_time = time_now + 1.5
         elif smooth_C > brake_thres:
@@ -217,32 +229,43 @@ def process_perception_data(
     left_mag, center_mag, right_mag, probe_mag, probe_count, left_count, center_count, right_count = compute_region_stats(magnitudes, good_old, gray.shape[1])
     flow_history.update(left_mag, center_mag, right_mag)
     smooth_L, smooth_C, smooth_R = flow_history.average()
+    delta_L = smooth_L - param_refs['prev_L'][0]
+    delta_C = smooth_C - param_refs['prev_C'][0]
+    delta_R = smooth_R - param_refs['prev_R'][0]
+    param_refs['prev_L'][0], param_refs['prev_C'][0], param_refs['prev_R'][0] = (
+        smooth_L, smooth_C, smooth_R
+    )
+    param_refs['delta_L'][0], param_refs['delta_C'][0], param_refs['delta_R'][0] = (
+        delta_L, delta_C, delta_R
+    )
     param_refs['L'][0], param_refs['C'][0], param_refs['R'][0] = smooth_L, smooth_C, smooth_R
     if navigator.just_resumed and time_now < navigator.resume_grace_end_time:
         cv2.putText(vis_img, "GRACE", (1100, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 3)
     in_grace = navigator.just_resumed and time_now < navigator.resume_grace_end_time
     return (
         vis_img, good_old, flow_vectors, flow_std, simgetimage_s, decode_s, processing_s,
-        smooth_L, smooth_C, smooth_R, probe_mag, probe_count, left_count, center_count, right_count, in_grace,
+        smooth_L, smooth_C, smooth_R, delta_L, delta_C, delta_R,
+        probe_mag, probe_count, left_count, center_count, right_count, in_grace,
     )
 
 def apply_navigation_decision(
     client, navigator, flow_history, good_old, flow_vectors, flow_std,
-    smooth_L, smooth_C, smooth_R, probe_mag, probe_count,
+    smooth_L, smooth_C, smooth_R, delta_C, probe_mag, probe_count,
     left_count, center_count, right_count, frame_queue, vis_img,
     time_now, frame_count, prev_state, state_history, pos_history, param_refs,
 ):
     """Wrapper around navigation_step for clarity."""
     return navigation_step(
         client, navigator, flow_history, good_old, flow_vectors, flow_std,
-        smooth_L, smooth_C, smooth_R, probe_mag, probe_count,
+        smooth_L, smooth_C, smooth_R, delta_C, probe_mag, probe_count,
         left_count, center_count, right_count, frame_queue, vis_img,
         time_now, frame_count, prev_state, state_history, pos_history, param_refs,
     )
 
 def write_frame_output(
     client, vis_img, frame_queue, loop_start, frame_duration, fps_list, start_time,
-    smooth_L, smooth_C, smooth_R, left_count, center_count, right_count,
+    smooth_L, smooth_C, smooth_R, delta_L, delta_C, delta_R,
+    left_count, center_count, right_count,
     good_old, flow_vectors, in_grace, frame_count, time_now, param_refs,
     log_file, log_buffer, state_str, obstacle_detected, side_safe,
     brake_thres, dodge_thres, probe_req, simgetimage_s, decode_s, processing_s, flow_std,
@@ -256,7 +279,9 @@ def write_frame_output(
     collided = int(getattr(collision, "has_collided", False))
     vis_img = draw_overlay(
         vis_img, frame_count, speed, param_refs['state'][0], time_now - start_time,
-        smooth_L, smooth_C, smooth_R, left_count, center_count, right_count,
+        smooth_L, smooth_C, smooth_R,
+        delta_L, delta_C, delta_R,
+        left_count, center_count, right_count,
         good_old, flow_vectors, in_grace=in_grace,
     )
     write_video_frame(frame_queue, vis_img)
@@ -267,7 +292,9 @@ def write_frame_output(
     loop_start = time.time()
     fps_list.append(actual_fps)
     log_line = format_log_line(
-        frame_count, time_now, good_old, smooth_L, smooth_C, smooth_R, flow_std,
+        frame_count, time_now, good_old,
+        smooth_L, smooth_C, smooth_R,
+        delta_L, delta_C, delta_R, flow_std,
         pos, yaw, speed, state_str, collided, obstacle_detected, side_safe,
         brake_thres, dodge_thres, probe_req, actual_fps,
         simgetimage_s, decode_s, processing_s, loop_elapsed,
@@ -300,7 +327,7 @@ def handle_reset(client, ctx, frame_count):
     ctx['log_file'] = log_file
     log_file.write(
         "frame,time,features,flow_left,flow_center,flow_right,"
-        "flow_std,pos_x,pos_y,pos_z,yaw,speed,state,collided,obstacle,side_safe,"
+        "delta_left,delta_center,delta_right,flow_std,pos_x,pos_y,pos_z,yaw,speed,state,collided,obstacle,side_safe,"
         "brake_thres,dodge_thres,probe_req,fps,simgetimage_s,decode_s,processing_s,loop_s\n"
     )
     retain_recent_logs("flow_logs")
@@ -317,7 +344,12 @@ def setup_environment(args, client):
     """Initialize the navigation environment and return a context dict."""
     from uav.interface import exit_flag, start_gui
     from uav.utils import retain_recent_logs
-    param_refs = {'L': [0.0], 'C': [0.0], 'R': [0.0], 'state': [''], 'reset_flag': [False]}
+    param_refs = {
+        'L': [0.0], 'C': [0.0], 'R': [0.0],
+        'prev_L': [0.0], 'prev_C': [0.0], 'prev_R': [0.0],
+        'delta_L': [0.0], 'delta_C': [0.0], 'delta_R': [0.0],
+        'state': [''], 'reset_flag': [False]
+    }
     start_gui(param_refs)
     logger.info("Available vehicles: %s", client.listVehicles())
     client.enableApiControl(True); client.armDisarm(True)
@@ -335,7 +367,7 @@ def setup_environment(args, client):
     log_file = open(f"flow_logs/full_log_{timestamp}.csv", 'w')
     log_file.write(
         "frame,time,features,flow_left,flow_center,flow_right,"
-        "flow_std,pos_x,pos_y,pos_z,yaw,speed,state,collided,obstacle,side_safe,"
+        "delta_left,delta_center,delta_right,flow_std,pos_x,pos_y,pos_z,yaw,speed,state,collided,obstacle,side_safe,"
         "brake_thres,dodge_thres,probe_req,fps,simgetimage_s,decode_s,processing_s,loop_s\n"
     )
     retain_recent_logs("flow_logs")
@@ -436,13 +468,14 @@ def navigation_loop(args, client, ctx):
             if processed is None: continue
             (
                 vis_img, good_old, flow_vectors, flow_std, simgetimage_s, decode_s, processing_s,
-                smooth_L, smooth_C, smooth_R, probe_mag, probe_count, left_count, center_count, right_count, in_grace,
+                smooth_L, smooth_C, smooth_R, delta_L, delta_C, delta_R,
+                probe_mag, probe_count, left_count, center_count, right_count, in_grace,
             ) = processed
             (
                 state_str, obstacle_detected, side_safe, brake_thres, dodge_thres, probe_req,
             ) = apply_navigation_decision(
                 client, navigator, flow_history, good_old, flow_vectors, flow_std,
-                smooth_L, smooth_C, smooth_R, probe_mag, probe_count,
+                smooth_L, smooth_C, smooth_R, delta_C, probe_mag, probe_count,
                 left_count, center_count, right_count, frame_queue, vis_img,
                 time_now, frame_count, prev_state, state_history, pos_history, param_refs,
             )
@@ -452,7 +485,8 @@ def navigation_loop(args, client, ctx):
                 continue
             loop_start = write_frame_output(
                 client, vis_img, frame_queue, loop_start, frame_duration, fps_list, start_time,
-                smooth_L, smooth_C, smooth_R, left_count, center_count, right_count,
+                smooth_L, smooth_C, smooth_R, delta_L, delta_C, delta_R,
+                left_count, center_count, right_count,
                 good_old, flow_vectors, in_grace, frame_count, time_now, param_refs,
                 log_file, log_buffer, state_str, obstacle_detected, side_safe,
                 brake_thres, dodge_thres, probe_req, simgetimage_s, decode_s, processing_s, flow_std,
