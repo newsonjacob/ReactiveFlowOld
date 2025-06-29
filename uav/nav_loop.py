@@ -232,7 +232,15 @@ def process_perception_data(
         logger.info("Manual nudge forward for test")
         client.moveByVelocityAsync(2, 0, 0, 2)
 
-    magnitudes = np.linalg.norm(flow_vectors, axis=1)
+    # Handle empty or malformed flow_vectors
+    # Before this line:
+    # magnitudes = np.linalg.norm(flow_vectors, axis=1)
+    if flow_vectors.size == 0:
+        magnitudes = np.array([])
+    else:
+        if flow_vectors.ndim == 1:
+            flow_vectors = flow_vectors.reshape(-1, 2)
+        magnitudes = np.linalg.norm(flow_vectors, axis=1)
     num_clamped = np.sum(magnitudes > max_flow_mag)
     if num_clamped > 0:
         logger.warning("Clamped %d large flow magnitudes to %s", num_clamped, max_flow_mag)

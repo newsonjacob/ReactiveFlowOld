@@ -1,6 +1,6 @@
 # Configuration constants for UAV navigation
 
-MAX_FLOW_MAG = 10.0
+MAX_FLOW_MAG = 50.0
 MAX_VECTOR_COMPONENT = 20.0
 MIN_FEATURES_PER_ZONE = 10
 GRACE_PERIOD_SEC = 1.0

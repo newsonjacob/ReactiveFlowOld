@@ -9,12 +9,13 @@ import numpy as np
 import airsim
 from analysis.utils import retain_recent_files
 from datetime import datetime
+from uav.config import FLOW_STD_MAX
 
 logger = logging.getLogger(__name__)
 
 # Maximum acceptable standard deviation of optical flow magnitudes. When the
 # measured value exceeds this threshold the flow is considered unreliable.
-FLOW_STD_MAX = 10.0
+FLOW_STD_MAX = 50.0
 
 
 def apply_clahe(gray_image):
