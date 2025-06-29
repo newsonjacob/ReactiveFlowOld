@@ -19,7 +19,7 @@ from uav.logging_utils import format_log_line
 from uav.perception import OpticalFlowTracker, FlowHistory
 from uav.navigation import Navigator
 from uav.state_checks import in_grace_period
-from uav.scoring import get_weighted_scores, compute_region_stats
+from uav.scoring import compute_region_stats
 from uav.utils import FLOW_STD_MAX, get_drone_state, retain_recent_logs, should_flat_wall_dodge
 from analysis.utils import retain_recent_views
 from uav import config
@@ -69,15 +69,11 @@ def navigation_step(
     valid_C = center_count >= config.MIN_FEATURES_PER_ZONE
     valid_R = right_count >= config.MIN_FEATURES_PER_ZONE
 
-    left_score, center_score, right_score = get_weighted_scores(
-        smooth_L, smooth_C, smooth_R, left_count, center_count, right_count
-    )
-
     logger.debug(
-        "Weighted Scores — L: %.2f, C: %.2f, R: %.2f",
-        left_score,
-        center_score,
-        right_score,
+        "Flow Magnitudes — L: %.2f, C: %.2f, R: %.2f",
+        smooth_L,
+        smooth_C,
+        smooth_R,
     )
 
     if in_grace_period(time_now, navigator):
@@ -116,12 +112,12 @@ def navigation_step(
             navigator.grace_period_end_time = time_now + 1.5
         elif center_high and side_safe:
             logger.debug(
-                "Hybrid Scores — L: %.2f, C: %.2f, R: %.2f",
-                left_score,
-                center_score,
-                right_score,
+                "Flow Magnitudes — L: %.2f, C: %.2f, R: %.2f",
+                smooth_L,
+                smooth_C,
+                smooth_R,
             )
-            if left_score < right_score:
+            if smooth_L < smooth_R:
                 state_str = navigator.dodge(smooth_L, smooth_C, smooth_R, direction='left')
             else:
                 state_str = navigator.dodge(smooth_L, smooth_C, smooth_R, direction='right')

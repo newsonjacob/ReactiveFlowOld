@@ -1,15 +1,4 @@
 import numpy as np
-def get_weighted_scores(smooth_L, smooth_C, smooth_R, left_count, center_count, right_count):
-    """
-    Calculate weighted scores by multiplying smoothed optical flow magnitude by feature count.
-
-    Returns:
-        (float, float, float): Scores for left, center, right.
-    """
-    left_score = smooth_L * left_count
-    center_score = smooth_C * center_count
-    right_score = smooth_R * right_count
-    return left_score, center_score, right_score
 
 def compute_region_stats(magnitudes: np.ndarray, good_old: np.ndarray, image_width: int):
     h = 720  # Fixed height based on 1280x720 resolution
