@@ -35,7 +35,9 @@ class Navigator:
     def brake(self):
         """Stop the drone immediately."""
         logger.info("\U0001F6D1 Braking")
-        self.client.moveByVelocityAsync(0, 0, 0, 1)
+        # self.client.moveByVelocityAsync(0, 0, 0, 1) # Stop all velocity for duration 1 second
+        pos = self.client.getMultirotorState().kinematics_estimated.position
+        self.client.moveToPositionAsync(pos.x_val, pos.y_val, pos.z_val, 1)
         self.braked = True
         return "brake"
 
