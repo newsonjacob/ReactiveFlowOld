@@ -109,7 +109,7 @@ def should_flat_wall_dodge(
         unreliable.
     """
 
-    if flow_std > std_threshold:
+    if flow_std >= std_threshold:
         # Optical flow is noisy – skip this heuristic
         return False
 
