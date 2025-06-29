@@ -197,6 +197,7 @@ def test_navigation_skips_actions_during_grace_after_blind_forward(monkeypatch):
         0.1,
         2.0,
         0.0,
+        0.0,
         0,
         0,
         0,
