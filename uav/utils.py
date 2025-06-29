@@ -13,11 +13,6 @@ from uav.config import FLOW_STD_MAX
 
 logger = logging.getLogger(__name__)
 
-# Maximum acceptable standard deviation of optical flow magnitudes. When the
-# measured value exceeds this threshold the flow is considered unreliable.
-FLOW_STD_MAX = 50.0
-
-
 def apply_clahe(gray_image):
     """Improve contrast of a grayscale image using CLAHE."""
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
