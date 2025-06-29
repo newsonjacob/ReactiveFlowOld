@@ -878,27 +878,6 @@ def cleanup(client, sim_process, ctx):
         median_fps = statistics.median(fps_list)
         logger.info("Median FPS: %.2f", median_fps)
 
-        input_video = config.VIDEO_OUTPUT
-        output_video = 'flow_output_fixed.avi'
-
-        cap = cv2.VideoCapture(input_video)
-        fourcc = cv2.VideoWriter_fourcc(*'MJPG')
-        out_fixed = cv2.VideoWriter(output_video, fourcc, median_fps, (1280, 720))
-
-        frame_count = 0
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            out_fixed.write(frame)
-            frame_count += 1
-
-        cap.release()
-        out_fixed.release()
-        logger.info(
-            "Re-encoded %d frames at %.2f FPS to %s", frame_count, median_fps, output_video
-        )
-
 
 def run_navigation(args, client, sim_process, SETTINGS_PATH):
     """Entry point used by main.py for running the full navigation loop."""
