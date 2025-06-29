@@ -28,6 +28,7 @@ pip install -e .
 - The system captures images from a front-facing virtual camera
 - Optical flow vectors are extracted and used to detect motion in different zones
 - The UAV avoids obstacles by adjusting yaw based on zone flow magnitudes
+- After the first forward command a brief grace period suppresses additional navigation actions
 
 ---
 
