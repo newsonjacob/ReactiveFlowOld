@@ -366,6 +366,17 @@ def write_frame_output(
     flow_std,
 ):
     """Write video frame, overlay and log data."""
+    write_video_frame(frame_queue, vis_img)
+
+    elapsed = time.time() - loop_start
+    if elapsed < frame_duration:
+        time.sleep(frame_duration - elapsed)
+    loop_elapsed = time.time() - loop_start
+    actual_fps = 1 / max(loop_elapsed, 1e-6)
+    loop_start = time.time()
+
+    fps_list.append(actual_fps)
+
     pos, yaw, speed = get_drone_state(client)
     collision = client.simGetCollisionInfo()
     collided = int(getattr(collision, "has_collided", False))
@@ -385,17 +396,6 @@ def write_frame_output(
         flow_vectors,
         in_grace=in_grace,
     )
-
-    write_video_frame(frame_queue, vis_img)
-
-    elapsed = time.time() - loop_start
-    if elapsed < frame_duration:
-        time.sleep(frame_duration - elapsed)
-    loop_elapsed = time.time() - loop_start
-    actual_fps = 1 / max(loop_elapsed, 1e-6)
-    loop_start = time.time()
-
-    fps_list.append(actual_fps)
 
     log_line = format_log_line(
         frame_count,
