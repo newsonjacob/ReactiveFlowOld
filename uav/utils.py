@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 def apply_clahe(gray_image):
     """Improve contrast of a grayscale image using CLAHE."""
-    clahe = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(4, 4))
+    clahe = cv2.createCLAHE(clipLimit=6.0, tileGridSize=(4, 4))
     return clahe.apply(gray_image)
 
 
