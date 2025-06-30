@@ -33,99 +33,67 @@ class Navigator:
         return pos, yaw, speed
 
     def brake(self):
-        """Stop the drone immediately."""
-        logger.info("\U0001F6D1 Braking")
+        """Stop the drone immediately with a reverse velocity proportional to current speed."""
         try:
-            pos = self.client.getMultirotorState().kinematics_estimated.position
-            self.client.moveToPositionAsync(pos.x_val, pos.y_val, pos.z_val, 1)
+            # Get current velocity
+            state = self.client.getMultirotorState()
+            vel = state.kinematics_estimated.linear_velocity
+            speed = vel.x_val
+            # Apply reverse velocity proportional to current forward speed (clamp if needed)
+            reverse_speed = -min(speed, 3.0)  # Limit max reverse speed for safety
+            self.client.moveByVelocityAsync(reverse_speed, 0, 0, 0.5)
         except AttributeError:
-            self.client.moveByVelocityAsync(0, 0, 0, 1)
+            self.client.moveByVelocityAsync(0, 0, 0, 0.5)
         self.braked = True
         return "brake"
 
-    def dodge(self, smooth_L, smooth_C, smooth_R, duration: float = 2.0, direction: str = None):
-        logger.info(
-            "\U0001F50D Dodge Decision — L: %.1f, C: %.1f, R: %.1f",
-            smooth_L,
-            smooth_C,
-            smooth_R,
-        )
-
-        # Allow external override of dodge direction (used in hybrid scoring)
-        if direction is None:
-            left_safe = smooth_L < 0.8 * smooth_C
-            right_safe = smooth_R < 0.8 * smooth_C
-
-            if left_safe and not right_safe:
-                direction = "left"
-            elif right_safe and not left_safe:
-                direction = "right"
-            elif left_safe and right_safe:
-                direction = "left" if smooth_L <= smooth_R else "right"
-                logger.warning(
-                    "\u26A0\uFE0F Both sides okay — picking %s", direction
-                )
-            else:
-                direction = "left" if smooth_L <= smooth_R else "right"
-                logger.warning(
-                    "\u26A0\uFE0F No safe sides — forcing %s", direction
-                )
-        else:
-            logger.info("\U0001F4E3 Dodge direction forced by caller: %s", direction)
-
+    def dodge(self, smooth_L, smooth_C, smooth_R, duration: float = 2.0, direction: str = None): # type: ignore
         lateral = 1.0 if direction == "right" else -1.0
-        strength = 0.5 if max(smooth_L, smooth_R) > 100 else 1.0
+        # strength = 0.75 if max(smooth_L, smooth_R) > 100 else 1.0
+        strength = 1.0
         forward_speed = 0.0
 
         # Stop before dodging
         self.brake()
-
-        logger.info(
-            "\U0001F500 Dodging %s (strength %.1f, forward %.1f)",
-            direction,
-            strength,
-            forward_speed,
-        )
-        self.client.moveByVelocityBodyFrameAsync(
-            forward_speed,
-            lateral * strength,
-            0,
-            duration
-        )
+        time.sleep(0.5)  # Allow time for braking to take effect
+        self.client.moveByVelocityBodyFrameAsync(forward_speed,lateral * strength,0,duration)
 
         self.dodging = True
         self.braked = False
-        self.settling = True
-        self.settle_end_time = time.time() + 0.1
         self.last_movement_time = time.time()
+        self.dodge_direction = direction
+        self.dodge_strength = strength
         return f"dodge_{direction}"
+
+    def maintain_dodge(self):
+        """Maintain the dodge movement."""
+        if self.dodging:
+            lateral = 1.0 if self.dodge_direction == "right" else -1.0
+            self.client.moveByVelocityBodyFrameAsync(0.0, lateral * self.dodge_strength, 0, duration=0.3)
 
     def resume_forward(self):
         """Resume normal forward velocity."""
-        logger.info("\u2705 Resuming forward motion")
-        self.client.moveByVelocityAsync(2, 0, 0, duration=3,
+        state = self.client.getMultirotorState()
+        z = state.kinematics_estimated.position.z_val  # NED: z is negative up
+        self.client.moveByVelocityZAsync(2, 0, 0, duration=3,
             drivetrain=airsim.DrivetrainType.ForwardOnly,
             yaw_mode=airsim.YawMode(False, 0))
         self.braked = False
         self.dodging = False
         self.just_resumed = True
-        self.resume_grace_end_time = time.time() + 0.75  # 0.75 second grace
+        self.resume_grace_end_time = time.time() + 0 # 0 second grace
         self.last_movement_time = time.time()
         return "resume"
 
     def blind_forward(self):
         """Move forward when no features are detected."""
         logger.warning(
-            "\u26A0\uFE0F No features — continuing blind forward motion"
-        )
-        self.client.moveByVelocityAsync(
-            2,
-            0,
-            0,
-            duration=2,
+            "\u26A0\uFE0F No features — continuing blind forward motion")
+        state = self.client.getMultirotorState()
+        z = state.kinematics_estimated.position.z_val  # NED: z is negative up
+        self.client.moveByVelocityZAsync(2,0,0,duration=2,
             drivetrain=airsim.DrivetrainType.ForwardOnly,
-            yaw_mode=airsim.YawMode(False, 0),
-        )
+            yaw_mode=airsim.YawMode(False, 0),)
         self.last_movement_time = time.time()
         if not self.grace_used:
             self.just_resumed = True
@@ -138,14 +106,18 @@ class Navigator:
         logger.warning(
             "\u26A0\uFE0F Low flow + zero velocity — nudging forward"
         )
-        self.client.moveByVelocityAsync(0.5, 0, 0, 1)
+        state = self.client.getMultirotorState()
+        z = state.kinematics_estimated.position.z_val  # NED: z is negative up
+        self.client.moveByVelocityZAsync(0.5, 0, 0, 1)
         self.last_movement_time = time.time()
         return "nudge"
 
     def reinforce(self):
         """Reissue the forward command to reinforce motion."""
         logger.info("\U0001F501 Reinforcing forward motion")
-        self.client.moveByVelocityAsync(
+        state = self.client.getMultirotorState()
+        z = state.kinematics_estimated.position.z_val  # NED: z is negative up
+        self.client.moveByVelocityZAsync(
             2, 0, 0,
             duration=3,
             drivetrain=airsim.DrivetrainType.ForwardOnly,

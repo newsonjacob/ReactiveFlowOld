@@ -30,6 +30,9 @@ from uav import config
 
 logger = logging.getLogger(__name__)
 
+# Grace period duration (seconds) after dodge/brake actions
+NAV_GRACE_PERIOD_SEC = 0.5
+
 # === Perception Processing ===
 
 def perception_loop(tracker, image):
@@ -44,7 +47,7 @@ def perception_loop(tracker, image):
 
 def navigation_step(
     client, navigator, flow_history, good_old, flow_vectors, flow_std,
-    smooth_L, smooth_C, smooth_R, delta_C, probe_mag, probe_count,
+    smooth_L, smooth_C, smooth_R, delta_L, delta_C, delta_R, probe_mag, probe_count,
     left_count, center_count, right_count, frame_queue, vis_img,
     time_now, frame_count, prev_state, state_history, pos_history, param_refs
 ):
@@ -57,126 +60,137 @@ def navigation_step(
     dodge_thres = 0.0
     probe_req = 0.0
     side_safe = False
+    left_safe = False
+    right_safe = False
+    obstacle_detected = 0
 
     # --- Feature Validity ---
     valid_L = left_count >= config.MIN_FEATURES_PER_ZONE
     valid_C = center_count >= config.MIN_FEATURES_PER_ZONE
     valid_R = right_count >= config.MIN_FEATURES_PER_ZONE
 
-    logger.debug(
-        "Flow Magnitudes — L: %.2f, C: %.2f, R: %.2f",
-        smooth_L, smooth_C, smooth_R,
-    )
+    logger.debug("Flow Magnitudes — L: %.2f, C: %.2f, R: %.2f", smooth_L, smooth_C, smooth_R,)
 
     # --- Grace Period Handling ---
     if in_grace_period(time_now, navigator):
         param_refs['state'][0] = "🕒 grace"
         obstacle_detected = 0
         try:
-            frame_queue.get_nowait()
+            frame_queue.get_nowait() # check this!
         except Exception:
             pass
         frame_queue.put(vis_img)
         return state_str, obstacle_detected, side_safe, brake_thres, dodge_thres, probe_req
-
+        
     navigator.just_resumed = False
 
     # --- Navigation Logic ---
-    if len(good_old) < 5:
-        if smooth_L > 1.5 and smooth_R > 1.5 and smooth_C < 0.2:
+    # First check if we have enough features to make a decision
+    if len(good_old) < 10: 
+        if smooth_L > 1.5 and smooth_R > 1.5 and smooth_C < 0.2: 
             state_str = navigator.brake()
         else:
             state_str = navigator.blind_forward()
-    else:
+    else: # Enough features to make a decision
         pos, yaw, speed = get_drone_state(client)
         brake_thres, dodge_thres = compute_thresholds(speed)
 
-        center_high = valid_C and (smooth_C > dodge_thres or smooth_C > 2 * min(smooth_L, smooth_R))
-        side_safe = (
-            valid_L and valid_R and abs(smooth_L - smooth_R) > 0.3 * smooth_C and (smooth_L < 100 or smooth_R < 100)
-        )
+        # Define certain navigation conditions
+        sudden_center_flow_rise = delta_C > 1 and center_count >= 20 # Sudden rise in center flow magnitude
+        center_blocked = smooth_C > brake_thres and center_count >= 20 # Center flow is high enough to indicate an obstacle
+        left_clearing = delta_L < -0.3 # Sudden drop in left flow magnitude
+        right_clearing = delta_R < -0.3 # Sudden drop in right flow magnitude       
+        probe_reliable = probe_count > config.MIN_PROBE_FEATURES and probe_mag > 0.05 # Probe data is reliable
+        
+        # --- Side safety checks ---
+        # Check left side safety
+        if valid_L and smooth_L < brake_thres:
+            left_safe = True # Left side is safe
+        elif left_count < 10 and center_count >= left_count * 5:
+            left_safe = True # Left side has very few features, indicating it may be clear
+        # Check right side safety
+        if valid_R and smooth_R < brake_thres:
+            right_safe = True # Right side is safe
+        elif right_count < 10 and center_count >= right_count * 5:
+            right_safe = True # Right side has very few features, indicating it may be clear
+        # Determine if at least one side is safe
+        if left_safe == True and right_safe == True:
+            side_safe = True
+        
+        # --- Obstacle Detection ---
+        if sudden_center_flow_rise or center_blocked or (center_count > 100 and (smooth_C > brake_thres * 0.5 or delta_C > 0.5)):
+            obstacle_detected = 1
+        elif delta_C > 0.5 and smooth_C > brake_thres * 0.5 and center_count > 50:
+            obstacle_detected = 1  
+        else:
+            obstacle_detected = 0
 
-        probe_reliable = probe_count > config.MIN_PROBE_FEATURES and probe_mag > 0.05
-
-        # --- Obstacle Handling ---
-        sudden_rise = delta_C > 0.2
-        if sudden_rise:
-            logger.debug("Sudden delta_C %.2f", delta_C)
-            if center_high and side_safe:
-                if smooth_L < smooth_R:
+        # --- Obstacle handling logic ---
+        # Sides are safe
+        if obstacle_detected and side_safe and not navigator.dodging:
+            if left_safe and right_safe:
+                if left_count < right_count:
+                    logger.info("\U0001F500 Both sides safe — Dodging left")
                     state_str = navigator.dodge(smooth_L, smooth_C, smooth_R, direction='left')
                 else:
+                    logger.info("\U0001F500 Both sides safe — Dodging right")
                     state_str = navigator.dodge(smooth_L, smooth_C, smooth_R, direction='right')
-                navigator.grace_period_end_time = time_now + 1.5
-            elif smooth_C > brake_thres * 0.5:
-                state_str = navigator.brake()
-                navigator.grace_period_end_time = time_now + 1.5
-        elif smooth_C > (brake_thres * 1.5):
-            state_str = navigator.brake()
-            navigator.grace_period_end_time = time_now + 1.5
-        elif smooth_C > brake_thres:
-            state_str = navigator.brake()
-            navigator.grace_period_end_time = time_now + 1.5
-        elif center_high and side_safe:
-            logger.debug(
-                "Flow Magnitudes — L: %.2f, C: %.2f, R: %.2f",
-                smooth_L, smooth_C, smooth_R,
-            )
-            if smooth_L < smooth_R:
+            elif left_safe:
+                    logger.info("\U0001F500 Left safe — Dodging left")
+                    state_str = navigator.dodge(smooth_L, smooth_C, smooth_R, direction='left')   
+            else:
+                logger.info("\U0001F500 Right safe — Dodging right")
+                state_str = navigator.dodge(smooth_L, smooth_C, smooth_R, direction='right')            
+
+        # Sides are clearing
+        elif obstacle_detected and (left_clearing or right_clearing) and not navigator.dodging: # Sides are clearing, dodge to the side with lower flow magnitude
+            logger.info("\U0001F500 Sides clearing, Dodging")
+            if delta_L < delta_R:
                 state_str = navigator.dodge(smooth_L, smooth_C, smooth_R, direction='left')
             else:
-                state_str = navigator.dodge(smooth_L, smooth_C, smooth_R, direction='right')
-            navigator.grace_period_end_time = time_now + 1.5
-        elif probe_mag < 0.5 and smooth_C > 0.7:
-            if should_flat_wall_dodge(smooth_C, probe_mag, probe_count, config.MIN_PROBE_FEATURES, flow_std, FLOW_STD_MAX):
-                logger.warning("Flat wall detected — attempting fallback dodge")
-                state_str = navigator.dodge(smooth_L, smooth_C, smooth_R)
-                navigator.grace_period_end_time = time_now + 1.5
+                state_str = navigator.dodge(smooth_L, smooth_C, smooth_R, direction='right')   
+        
+        # Sides are not safe
+        elif obstacle_detected and not (navigator.braked or navigator.dodging): # Sudden rise in Center flow but sides are not safe, just brake
+            logger.info("\U0001F6D1 Sides not safe — Braking")
+            state_str = navigator.brake()
+        
+        if navigator.dodging and obstacle_detected == 1:
+            navigator.maintain_dodge()
+
+        # Only end dodge when obstacle_detected goes to 0
+        if (navigator.dodging or navigator.braked) and obstacle_detected == 0:
+            logger.info("\u2705 Obstacle cleared — resuming forward")
+            state_str = navigator.resume_forward()
 
     # --- Recovery/State Maintenance ---
-    if state_str == "none":
-        if (
-            navigator.dodging
-            and smooth_C < dodge_thres * 0.9
-            and time_now >= navigator.grace_period_end_time
-            and not navigator.settling
-        ):
+    if state_str == "none": # 
+        if (navigator.dodging and smooth_C < dodge_thres * 0.9
+            and not navigator.settling):
             logger.info("Dodge ended — resuming forward at frame %s", frame_count)
-            state_str = navigator.resume_forward()
-        elif (
-            navigator.braked
+            state_str = navigator.resume_forward() # Resume forward after dodge
+        elif (navigator.braked
             and smooth_C < brake_thres * 0.8
             and smooth_L < brake_thres * 0.8
             and smooth_R < brake_thres * 0.8
-            and time_now >= navigator.grace_period_end_time
-        ):
+            and time_now >= navigator.grace_period_end_time):
             logger.info("Brake released — resuming forward at frame %s", frame_count)
-            state_str = navigator.resume_forward()
+            state_str = navigator.resume_forward() # Resume forward after brake
         elif not navigator.braked and not navigator.dodging and time_now - navigator.last_movement_time > 2:
-            state_str = navigator.reinforce()
+            state_str = navigator.reinforce() # Reinforce forward motion if no movement for a while
         elif (navigator.braked or navigator.dodging) and speed < 0.2 and smooth_C < 5 and smooth_L < 5 and smooth_R < 5:
-            state_str = navigator.nudge()
+            state_str = navigator.nudge() # Nudge forward if braked/dodging and very low speed
         elif time_now - navigator.last_movement_time > 4:
-            state_str = navigator.timeout_recover()
-
-    # --- Maintain Dodge State if Needed ---
-    if (
-        state_str == "none"
-        and navigator.dodging
-        and time_now < navigator.grace_period_end_time
-        and isinstance(prev_state, str)
-        and prev_state.startswith("dodge")
-    ):
-        state_str = prev_state
+            state_str = navigator.timeout_recover() # Timeout recovery if no movement for too long
 
     # --- Update State and History ---
     param_refs['state'][0] = state_str
-    obstacle_detected = int('dodge' in state_str or state_str == 'brake')
+    # obstacle_detected = int('dodge' in state_str or state_str == 'brake')
 
-    pos_hist, _, _ = get_drone_state(client)
+    pos_hist, _, _ = get_drone_state(client) 
     state_history.append(state_str)
     pos_history.append((pos_hist.x_val, pos_hist.y_val))
-    if len(state_history) == state_history.maxlen:
+    if len(state_history) == state_history.maxlen: 
         if all(s == state_history[-1] for s in state_history) and state_history[-1].startswith("dodge"):
             dx = pos_history[-1][0] - pos_history[0][0]
             dy = pos_history[-1][1] - pos_history[0][1]
@@ -186,8 +200,9 @@ def navigation_step(
                 state_history[-1] = state_str
                 param_refs['state'][0] = state_str
 
+    pos, yaw, speed = get_drone_state(client)
+    brake_thres, dodge_thres = compute_thresholds(speed)
     return state_str, obstacle_detected, side_safe, brake_thres, dodge_thres, probe_req
-
 
 def log_frame_data(log_file, log_buffer, line):
     """Buffer log lines and periodically flush to disk."""
@@ -222,7 +237,7 @@ def process_perception_data(
         if flow_vectors.ndim == 1: flow_vectors = flow_vectors.reshape(-1, 2)
         magnitudes = np.linalg.norm(flow_vectors, axis=1)
     num_clamped = np.sum(magnitudes > max_flow_mag)
-    if num_clamped > 0:
+    if num_clamped > 100:
         logger.warning("Clamped %d large flow magnitudes to %s", num_clamped, max_flow_mag)
     magnitudes = np.clip(magnitudes, 0, max_flow_mag)
     good_old = good_old.reshape(-1, 2)
@@ -250,14 +265,14 @@ def process_perception_data(
 
 def apply_navigation_decision(
     client, navigator, flow_history, good_old, flow_vectors, flow_std,
-    smooth_L, smooth_C, smooth_R, delta_C, probe_mag, probe_count,
+    smooth_L, smooth_C, smooth_R, delta_L, delta_C, delta_R, probe_mag, probe_count,
     left_count, center_count, right_count, frame_queue, vis_img,
     time_now, frame_count, prev_state, state_history, pos_history, param_refs,
 ):
     """Wrapper around navigation_step for clarity."""
     return navigation_step(
         client, navigator, flow_history, good_old, flow_vectors, flow_std,
-        smooth_L, smooth_C, smooth_R, delta_C, probe_mag, probe_count,
+        smooth_L, smooth_C, smooth_R, delta_L, delta_C, delta_R, probe_mag, probe_count,
         left_count, center_count, right_count, frame_queue, vis_img,
         time_now, frame_count, prev_state, state_history, pos_history, param_refs,
     )
@@ -292,11 +307,13 @@ def write_frame_output(
     loop_start = time.time()
     fps_list.append(actual_fps)
     log_line = format_log_line(
-        frame_count, time_now, good_old,
-        smooth_L, smooth_C, smooth_R,
+        frame_count, smooth_L, smooth_C, smooth_R, 
         delta_L, delta_C, delta_R, flow_std,
-        pos, yaw, speed, state_str, collided, obstacle_detected, side_safe,
+        left_count, center_count, right_count,
         brake_thres, dodge_thres, probe_req, actual_fps,
+        state_str, collided, obstacle_detected, side_safe,
+        pos, yaw, speed,
+        time_now, good_old,
         simgetimage_s, decode_s, processing_s, loop_elapsed,
     )
     log_frame_data(log_file, log_buffer, log_line)
@@ -326,9 +343,13 @@ def handle_reset(client, ctx, frame_count):
     log_file = open(f"flow_logs/full_log_{timestamp}.csv", 'w')
     ctx['log_file'] = log_file
     log_file.write(
-        "frame,time,features,flow_left,flow_center,flow_right,"
-        "delta_left,delta_center,delta_right,flow_std,pos_x,pos_y,pos_z,yaw,speed,state,collided,obstacle,side_safe,"
-        "brake_thres,dodge_thres,probe_req,fps,simgetimage_s,decode_s,processing_s,loop_s\n"
+        "frame,flow_left,flow_center,flow_right,"
+        "delta_left,delta_center,delta_right,flow_std,"
+        "left_count,center_count,right_count,"
+        "brake_thres,dodge_thres,probe_req,fps,"
+        "state,collided,obstacle,side_safe,"
+        "pos_x,pos_y,pos_z,yaw,speed,"
+        "time,features,simgetimage_s,decode_s,processing_s,loop_s\n"
     )
     retain_recent_logs("flow_logs")
     frame_queue.put(None)
@@ -366,9 +387,13 @@ def setup_environment(args, client):
     os.makedirs("flow_logs", exist_ok=True)
     log_file = open(f"flow_logs/full_log_{timestamp}.csv", 'w')
     log_file.write(
-        "frame,time,features,flow_left,flow_center,flow_right,"
-        "delta_left,delta_center,delta_right,flow_std,pos_x,pos_y,pos_z,yaw,speed,state,collided,obstacle,side_safe,"
-        "brake_thres,dodge_thres,probe_req,fps,simgetimage_s,decode_s,processing_s,loop_s\n"
+        "frame,flow_left,flow_center,flow_right,"
+        "delta_left,delta_center,delta_right,flow_std,"
+        "left_count,center_count,right_count,"
+        "brake_thres,dodge_thres,probe_req,fps,"
+        "state,collided,obstacle,side_safe,"
+        "pos_x,pos_y,pos_z,yaw,speed,"
+        "time,features,simgetimage_s,decode_s,processing_s,loop_s\n"
     )
     retain_recent_logs("flow_logs")
     try: fourcc = cv2.VideoWriter_fourcc(*'MJPG')
@@ -466,8 +491,7 @@ def navigation_loop(args, client, ctx):
                 client, args, data, frame_count, frame_queue, flow_history, navigator, param_refs, time_now, MAX_FLOW_MAG,
             )
             if processed is None: continue
-            (
-                vis_img, good_old, flow_vectors, flow_std, simgetimage_s, decode_s, processing_s,
+            (   vis_img, good_old, flow_vectors, flow_std, simgetimage_s, decode_s, processing_s,
                 smooth_L, smooth_C, smooth_R, delta_L, delta_C, delta_R,
                 probe_mag, probe_count, left_count, center_count, right_count, in_grace,
             ) = processed
@@ -475,7 +499,7 @@ def navigation_loop(args, client, ctx):
                 state_str, obstacle_detected, side_safe, brake_thres, dodge_thres, probe_req,
             ) = apply_navigation_decision(
                 client, navigator, flow_history, good_old, flow_vectors, flow_std,
-                smooth_L, smooth_C, smooth_R, delta_C, probe_mag, probe_count,
+                smooth_L, smooth_C, smooth_R, delta_L, delta_C, delta_R, probe_mag, probe_count,
                 left_count, center_count, right_count, frame_queue, vis_img,
                 time_now, frame_count, prev_state, state_history, pos_history, param_refs,
             )

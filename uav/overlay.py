@@ -35,14 +35,24 @@ def draw_overlay(vis_img, frame_count, speed, state, sim_time,
     cv2.putText(img, "Right", (2 * third + 10, label_y), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
 
     # Magnitudes + features
-    cv2.putText(img, f"L: {smooth_L:.1f} ({left_count})", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-    cv2.putText(img, f"C: {smooth_C:.1f} ({center_count})", (third + 10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-    cv2.putText(img, f"R: {smooth_R:.1f} ({right_count})", (2 * third + 10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-    cv2.putText(img, f"ΔL: {delta_L:+.2f}", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-    cv2.putText(img, f"ΔC: {delta_C:+.2f}", (third + 10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-    cv2.putText(img, f"ΔR: {delta_R:+.2f}", (2 * third + 10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+    cv2.putText(img, f"L: {smooth_L:.1f} ({left_count})", (w // 6, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+    cv2.putText(img, f"C: {smooth_C:.1f} ({center_count})", (w // 2, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+    cv2.putText(img, f"R: {smooth_R:.1f} ({right_count})", (5 * w // 6, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+    cv2.putText(img, f"dL: {delta_L:+.2f}", (w // 6, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+    cv2.putText(img, f"dC: {delta_C:+.2f}", (w // 2, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+    cv2.putText(img, f"dR: {delta_R:+.2f}", (5 * w // 6, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
-    # Status overlay
+    # Status overlay background
+    overlay_height = 120  # Adjust as needed to cover all text lines
+    overlay_width = 205   # Adjust as needed for your text length
+    alpha = 0.5           # Transparency: 0=transparent, 1=opaque
+
+    # Draw filled rectangle on a copy, then blend
+    overlay = img.copy()
+    cv2.rectangle(overlay, (0, 0), (overlay_width, overlay_height), (0, 0, 0), -1)
+    cv2.addWeighted(overlay, alpha, img, 1 - alpha, 0, img)
+
+    # Status overlay text (draw after blending)
     cv2.putText(img, f"Frame: {frame_count}", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
     cv2.putText(img, f"Speed: {speed:.2f}", (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
     cv2.putText(img, f"State: {state}", (10, 85), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
