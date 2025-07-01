@@ -73,6 +73,11 @@ class Navigator:
 
     def resume_forward(self):
         """Resume normal forward velocity."""
+
+        # Stop before resuming forward motion
+        self.client.moveByVelocityAsync(0, 0, 0, 0)
+        time.sleep(0.2)  # Allow time for braking to take effect
+        
         state = self.client.getMultirotorState()
         z = state.kinematics_estimated.position.z_val  # NED: z is negative up
         self.client.moveByVelocityZAsync(2, 0, 0, duration=3,
@@ -101,7 +106,7 @@ class Navigator:
             self.grace_used = True
         return "blind_forward"
 
-    def nudge(self):
+    def nudge_forward(self):
         """Gently push the drone forward when stalled."""
         logger.warning(
             "\u26A0\uFE0F Low flow + zero velocity — nudging forward"

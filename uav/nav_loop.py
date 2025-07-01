@@ -155,21 +155,16 @@ def navigation_step(
             logger.info("\U0001F6D1 Sides not safe — Braking")
             state_str = navigator.brake()
         
+        # Dodge maintenance
         if navigator.dodging and obstacle_detected == 1:
             navigator.maintain_dodge()
-
-        # Only end dodge when obstacle_detected goes to 0
         if (navigator.dodging or navigator.braked) and obstacle_detected == 0:
             logger.info("\u2705 Obstacle cleared — resuming forward")
             state_str = navigator.resume_forward()
 
     # --- Recovery/State Maintenance ---
     if state_str == "none": # 
-        if (navigator.dodging and smooth_C < dodge_thres * 0.9
-            and not navigator.settling):
-            logger.info("Dodge ended — resuming forward at frame %s", frame_count)
-            state_str = navigator.resume_forward() # Resume forward after dodge
-        elif (navigator.braked
+        if (navigator.braked
             and smooth_C < brake_thres * 0.8
             and smooth_L < brake_thres * 0.8
             and smooth_R < brake_thres * 0.8
@@ -179,7 +174,7 @@ def navigation_step(
         elif not navigator.braked and not navigator.dodging and time_now - navigator.last_movement_time > 2:
             state_str = navigator.reinforce() # Reinforce forward motion if no movement for a while
         elif (navigator.braked or navigator.dodging) and speed < 0.2 and smooth_C < 5 and smooth_L < 5 and smooth_R < 5:
-            state_str = navigator.nudge() # Nudge forward if braked/dodging and very low speed
+            state_str = navigator.nudge_forward() # Nudge forward if braked/dodging and very low speed
         elif time_now - navigator.last_movement_time > 4:
             state_str = navigator.timeout_recover() # Timeout recovery if no movement for too long
 
@@ -457,7 +452,7 @@ def navigation_loop(args, client, ctx):
     start_time, timestamp, fps_list, fourcc = ctx['start_time'], ctx['timestamp'], ctx['fps_list'], ctx['fourcc']
     MAX_FLOW_MAG, MAX_VECTOR_COMPONENT = config.MAX_FLOW_MAG, config.MAX_VECTOR_COMPONENT
     GRACE_PERIOD_SEC, MAX_SIM_DURATION = config.GRACE_PERIOD_SEC, args.max_duration
-    GOAL_X, GOAL_RADIUS = args.goal_x, config.GOAL_RADIUS
+    GOAL_X, GOAL_Y = args.goal_x, config.GOAL_Y
     frame_count, target_fps, frame_duration = 0, config.TARGET_FPS, 1.0 / config.TARGET_FPS
     grace_logged, startup_grace_over = False, False
     try:
@@ -485,8 +480,10 @@ def navigation_loop(args, client, ctx):
             if time_now - start_time >= MAX_SIM_DURATION:
                 logger.info("Time limit reached — landing and stopping."); break
             pos_goal, _, _ = get_drone_state(client)
-            if pos_goal.x_val >= GOAL_X - GOAL_RADIUS:
-                logger.info("Goal reached — landing."); break
+            threshold = 0.5  # Define a threshold for goal position proximity
+            if abs(pos_goal.x_val - GOAL_X) < threshold and abs(pos_goal.y_val - GOAL_Y) < threshold:
+                logger.info("Goal reached — landing.")
+                break
             processed = process_perception_data(
                 client, args, data, frame_count, frame_queue, flow_history, navigator, param_refs, time_now, MAX_FLOW_MAG,
             )
